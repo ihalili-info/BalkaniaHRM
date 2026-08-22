@@ -1,24 +1,28 @@
--- Fixes two regressions introduced by 20260909_geolocation_attendance.sql.
+-- Fixes a regression from 20260909_geolocation_attendance.sql, and closes a
+-- longer-standing privilege hole that investigating it surfaced.
 --
--- 1. BROKEN KIOSK. That migration added a 7th parameter to
---    _record_attendance_event_core. "create or replace" only replaces a
---    function with the *same* argument list -- changing the count creates an
---    overload instead, so the 6-argument version from
+-- 1. BROKEN KIOSK (introduced by 20260909). That migration added a 7th
+--    parameter to _record_attendance_event_core. "create or replace" only
+--    replaces a function with the *same* argument list -- changing the count
+--    creates an overload instead, so the 6-argument version from
 --    20260831_attendance_admin_override.sql was left in place alongside it.
 --    record_kiosk_attendance_event still calls the function with 6 arguments,
 --    which Postgres can now satisfy either by the 6-arg function or by the
 --    7-arg one filling p_location_status from its default -- an ambiguous
 --    call, rejected with "function ... is not unique". Every kiosk clock-in
---    has been failing since that migration was applied.
+--    failed between that migration and this one.
 --
--- 2. MISSING REVOKE. 20260827_kiosk_runtime.sql revokes PUBLIC execute on this
---    helper precisely because it is SECURITY DEFINER and performs no
---    authorization of its own -- callers are expected to come through a
---    wrapper that checks kiosk pairing, hr_admin role, or the self-service
---    permission. Postgres grants EXECUTE to PUBLIC on every newly created
---    function, and the new 7-arg overload never had that grant revoked, so it
---    was callable directly by any client and could record attendance for any
---    employee, bypassing all three checks.
+-- 2. OVER-BROAD EXECUTE GRANT (pre-dates 20260909). This helper is SECURITY
+--    DEFINER and performs no authorization of its own -- callers are meant to
+--    arrive through a wrapper that checks kiosk pairing, hr_admin role, or the
+--    self-service permission. 20260827_kiosk_runtime.sql tried to lock it down
+--    with "revoke all ... from public", but that only drops the PUBLIC
+--    pseudo-role. Supabase's default privileges *also* grant EXECUTE
+--    explicitly to anon and authenticated, and those grants survived. So the
+--    6-arg version had been directly callable by any client since kiosk
+--    runtime shipped, and the 7-arg overload inherited the same grants plus
+--    PUBLIC. Either could record attendance for any employee, bypassing all
+--    three checks.
 
 drop function if exists public._record_attendance_event_core(
   uuid, public.attendance_event_type, uuid, text, text, jsonb

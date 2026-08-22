@@ -50,6 +50,7 @@ import {
   returnAsset,
   reviewLeaveRequest,
   seedBankHolidays,
+  sendPasswordReset,
   setAssetRetired,
   setDeviceActive,
   setEmployeeActive,
@@ -295,7 +296,10 @@ function AdminLogin({ configured }: { configured: boolean }) {
   );
 }
 
-const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary"];
+// "employees" is included so supervisors can reach the staff directory to send
+// password resets. RLS scopes the profiles they can read to their own people,
+// and every HR-only action inside the module is gated on isHrAdmin.
+const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees"];
 
 function AdminShell({ profile }: { profile: Profile }) {
   // Team leads get the same portal view as managers, scoped by RLS to their
@@ -359,7 +363,9 @@ function AdminShell({ profile }: { profile: Profile }) {
         {module === "organization" && (
           <EmptyPanel icon="building" title="Organization" note="Company structure, branches, and departments will live here." />
         )}
-        {module === "employees" && <Employees setNotice={setNotice} />}
+        {module === "employees" && (
+          <Employees setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />
+        )}
         {module === "teams" && <Teams setNotice={setNotice} />}
         {module === "documents" && (
           <EmptyPanel icon="archive" title="Documents" note="Employee and company document storage is coming in a later release." />
@@ -452,7 +458,7 @@ function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
   );
 }
 
-function Employees({ setNotice }: NoticeProps) {
+function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
   const [rows, setRows] = useState<AdminEmployee[] | null>(null);
   const [tab, setTab] = useState<"active" | "former">("active");
   const [error, setError] = useState<string | null>(null);
@@ -487,6 +493,19 @@ function Employees({ setNotice }: NoticeProps) {
       );
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleSendReset(row: AdminEmployee) {
+    if (!window.confirm(`Email ${row.fullName} a password reset link? Their current password keeps working until they use it.`)) return;
+    setBusyId(row.id);
+    try {
+      const email = await sendPasswordReset(row.id);
+      setNotice(`Password reset sent to ${email}.`);
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't send the reset email."));
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -539,11 +558,18 @@ function Employees({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Add employee" onAction={() => setShowAddModal(true)} onExport={handleExport} exporting={exporting} />
-      <div className="module-tabs">
-        <button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Active</button>
-        <button className={tab === "former" ? "active" : ""} onClick={() => setTab("former")}>Former</button>
-      </div>
+      <Toolbar
+        action={isHrAdmin ? "Add employee" : undefined}
+        onAction={isHrAdmin ? () => setShowAddModal(true) : undefined}
+        onExport={handleExport}
+        exporting={exporting}
+      />
+      {isHrAdmin && (
+        <div className="module-tabs">
+          <button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Active</button>
+          <button className={tab === "former" ? "active" : ""} onClick={() => setTab("former")}>Former</button>
+        </div>
+      )}
       {showAddModal && (
         <AddEmployeeModal
           onClose={() => setShowAddModal(false)}
@@ -583,7 +609,7 @@ function Employees({ setNotice }: NoticeProps) {
               <span>
                 <i className="person-dot">{row.fullName[0]}</i>{row.fullName}
                 {!row.active && <span className="pill">Inactive</span>}
-                {!row.active && (
+                {isHrAdmin && !row.active && (
                   <button className="purge-link" disabled={busyId === row.id} onClick={() => handlePurge(row)}>
                     Purge all data
                   </button>
@@ -593,20 +619,33 @@ function Employees({ setNotice }: NoticeProps) {
               <span className="capitalize">{row.role.replace("_", " ")}</span>
               <span>{row.teamName ?? "—"}</span>
               <span className="row-actions">
-                <button className="icon-action" disabled={busyId === row.id} onClick={() => setEditingEmployee(row)} aria-label={`Edit ${row.fullName}`}>
-                  <Icon name="edit" size={15} />
-                </button>
                 <button
                   className="icon-action"
-                  disabled={busyId === row.id}
-                  onClick={() => handleToggleActive(row)}
-                  aria-label={row.active ? `Deactivate ${row.fullName}` : `Reactivate ${row.fullName}`}
+                  disabled={busyId === row.id || !row.active}
+                  onClick={() => handleSendReset(row)}
+                  aria-label={`Send ${row.fullName} a password reset`}
+                  title={row.active ? "Send password reset" : "Inactive employees can't sign in"}
                 >
-                  <Icon name={row.active ? "logout" : "check"} size={15} />
+                  <Icon name="mail" size={15} />
                 </button>
-                <button className="icon-action reject" disabled={busyId === row.id} onClick={() => handleDelete(row)} aria-label={`Delete ${row.fullName}`}>
-                  <Icon name="trash" size={15} />
-                </button>
+                {isHrAdmin && (
+                  <>
+                    <button className="icon-action" disabled={busyId === row.id} onClick={() => setEditingEmployee(row)} aria-label={`Edit ${row.fullName}`}>
+                      <Icon name="edit" size={15} />
+                    </button>
+                    <button
+                      className="icon-action"
+                      disabled={busyId === row.id}
+                      onClick={() => handleToggleActive(row)}
+                      aria-label={row.active ? `Deactivate ${row.fullName}` : `Reactivate ${row.fullName}`}
+                    >
+                      <Icon name={row.active ? "logout" : "check"} size={15} />
+                    </button>
+                    <button className="icon-action reject" disabled={busyId === row.id} onClick={() => handleDelete(row)} aria-label={`Delete ${row.fullName}`}>
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </>
+                )}
               </span>
             </div>
           ))}
@@ -3788,8 +3827,10 @@ function Toolbar({
   onExport,
   exporting,
 }: {
-  action: string;
-  onAction: () => void;
+  // Optional so a module can render the toolbar without a primary action --
+  // e.g. the staff directory for supervisors, who may look but not add.
+  action?: string;
+  onAction?: () => void;
   onExport?: () => void;
   exporting?: boolean;
 }) {
@@ -3802,7 +3843,9 @@ function Toolbar({
           <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export"}
         </button>
       )}
-      <button className="primary-admin" onClick={onAction}><Icon name="plus" size={15} /> {action}</button>
+      {action && onAction && (
+        <button className="primary-admin" onClick={onAction}><Icon name="plus" size={15} /> {action}</button>
+      )}
     </div>
   );
 }

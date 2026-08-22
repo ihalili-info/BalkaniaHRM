@@ -194,6 +194,17 @@ export async function updateEmployee(input: UpdateEmployeeInput): Promise<AdminE
   return mapEmployee(data);
 }
 
+// Returns the address the reset was sent to, so the UI can confirm *where* it
+// went -- HR can't see employee emails anywhere else in the admin portal.
+export async function sendPasswordReset(employeeId: string): Promise<string> {
+  const { data, error } = await client().functions.invoke("send-password-reset", {
+    body: { employeeId, redirectTo: `${window.location.origin}/welcome` },
+  });
+  if (error) return unwrapFunctionError(error);
+  if (data?.error) throw new Error(data.error);
+  return data.email;
+}
+
 export async function deleteEmployee(employeeId: string): Promise<void> {
   const { data, error } = await client().functions.invoke("delete-employee", { body: { employeeId } });
   if (error) return unwrapFunctionError(error);

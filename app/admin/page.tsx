@@ -1370,13 +1370,36 @@ function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; o
   );
 }
 
+// Only counts spans that both started *and* ended. A break still running is
+// deliberately excluded, matching what hoursWorked has always done -- so
+// worked + break + lunch always reconciles against the clock-in/out span.
+function spanHours(start: string | null, end: string | null): number {
+  if (!start || !end) return 0;
+  return Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 3600000);
+}
+
+function breakHours(row: AdminTimesheetRow): number {
+  return spanHours(row.firstBreakStartedAt, row.firstBreakEndedAt);
+}
+
+function lunchHours(row: AdminTimesheetRow): number {
+  return spanHours(row.lunchStartedAt, row.lunchEndedAt);
+}
+
 function hoursWorked(row: AdminTimesheetRow): number {
   if (!row.clockedInAt) return 0;
   const end = row.clockedOutAt ? new Date(row.clockedOutAt) : new Date();
-  let ms = end.getTime() - new Date(row.clockedInAt).getTime();
-  if (row.firstBreakStartedAt && row.firstBreakEndedAt) ms -= new Date(row.firstBreakEndedAt).getTime() - new Date(row.firstBreakStartedAt).getTime();
-  if (row.lunchStartedAt && row.lunchEndedAt) ms -= new Date(row.lunchEndedAt).getTime() - new Date(row.lunchStartedAt).getTime();
-  return Math.max(0, ms / 3600000);
+  const ms = end.getTime() - new Date(row.clockedInAt).getTime();
+  return Math.max(0, ms / 3600000 - breakHours(row) - lunchHours(row));
+}
+
+// Breaks are usually minutes, not hours, so "17m" reads better than "0.3h".
+function formatDurationHours(hours: number): string {
+  const totalMinutes = Math.round(hours * 60);
+  if (totalMinutes <= 0) return "—";
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return h ? `${h}h ${m}m` : `${m}m`;
 }
 
 interface EmployeeTimesheetSummary {
@@ -1385,6 +1408,8 @@ interface EmployeeTimesheetSummary {
   employeeCode: string;
   days: number;
   hours: number;
+  breakHours: number;
+  lunchHours: number;
 }
 
 function Timesheets({ setNotice }: NoticeProps) {
@@ -1413,16 +1438,30 @@ function Timesheets({ setNotice }: NoticeProps) {
     for (const row of rows) {
       const existing = byEmployee.get(row.employeeId);
       const hours = hoursWorked(row);
+      const breaks = breakHours(row);
+      const lunch = lunchHours(row);
       if (existing) {
         existing.days += 1;
         existing.hours += hours;
+        existing.breakHours += breaks;
+        existing.lunchHours += lunch;
       } else {
-        byEmployee.set(row.employeeId, { employeeId: row.employeeId, employeeName: row.employeeName, employeeCode: row.employeeCode, days: 1, hours });
+        byEmployee.set(row.employeeId, {
+          employeeId: row.employeeId,
+          employeeName: row.employeeName,
+          employeeCode: row.employeeCode,
+          days: 1,
+          hours,
+          breakHours: breaks,
+          lunchHours: lunch,
+        });
       }
     }
     summaries.push(...Array.from(byEmployee.values()).sort((a, b) => a.employeeName.localeCompare(b.employeeName)));
   }
   const totalHours = summaries.reduce((sum, s) => sum + s.hours, 0);
+  const totalBreakHours = summaries.reduce((sum, s) => sum + s.breakHours, 0);
+  const totalLunchHours = summaries.reduce((sum, s) => sum + s.lunchHours, 0);
 
   function handleExport() {
     if (!rows || rows.length === 0) {
@@ -1433,7 +1472,7 @@ function Timesheets({ setNotice }: NoticeProps) {
     try {
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Employee", "Employee code", "Date", "Clock in", "Clock out", "Hours"],
+        ["Employee", "Employee code", "Date", "Clock in", "Clock out", "Worked hours", "Break minutes", "Lunch minutes"],
         rows.map((row) => [
           row.employeeName,
           row.employeeCode,
@@ -1441,6 +1480,8 @@ function Timesheets({ setNotice }: NoticeProps) {
           row.clockedInAt ? formatTime(row.clockedInAt) : "",
           row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
           Math.round(hoursWorked(row) * 100) / 100,
+          Math.round(breakHours(row) * 60),
+          Math.round(lunchHours(row) * 60),
         ]),
       );
     } finally {
@@ -1467,8 +1508,9 @@ function Timesheets({ setNotice }: NoticeProps) {
       </div>
       <div className="admin-stats">
         <Stat label="Employees" value={String(summaries.length)} note="In range" />
-        <Stat label="Total hours" value={totalHours.toFixed(1)} note="All employees" />
-        <Stat label="Avg. hours" value={summaries.length ? (totalHours / summaries.length).toFixed(1) : "0"} note="Per employee" />
+        <Stat label="Worked hours" value={totalHours.toFixed(1)} note={summaries.length ? `${(totalHours / summaries.length).toFixed(1)} avg. per employee` : "All employees"} />
+        <Stat label="Break time" value={formatDurationHours(totalBreakHours)} note="All employees" />
+        <Stat label="Lunch time" value={formatDurationHours(totalLunchHours)} note="All employees" />
       </div>
       {error ? (
         <ErrorState message={error} />
@@ -1479,13 +1521,17 @@ function Timesheets({ setNotice }: NoticeProps) {
       ) : (
         <section className="panel">
           <div className="panel-title"><h2>Timesheet overview</h2><span className="filter">{formatDate(startDate)} – {formatDate(endDate)}</span></div>
-          <div className="table-head"><b>Employee</b><b>Employee code</b><b>Days worked</b><b>Total hours</b></div>
+          <div className="table-head cols-6">
+            <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b>
+          </div>
           {summaries.map((summary) => (
-            <div className="table-row" key={summary.employeeId}>
+            <div className="table-row cols-6" key={summary.employeeId}>
               <span>{summary.employeeName}</span>
               <span>{summary.employeeCode}</span>
               <span>{summary.days}</span>
               <span>{summary.hours.toFixed(1)}h</span>
+              <span>{formatDurationHours(summary.breakHours)}</span>
+              <span>{formatDurationHours(summary.lunchHours)}</span>
             </div>
           ))}
         </section>

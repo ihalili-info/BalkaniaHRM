@@ -457,6 +457,17 @@ export async function listUpcomingLeave(): Promise<AdminLeaveRequest[]> {
   });
 }
 
+// Withdraws a booked request and hands the days back. Server-side this sets
+// status = 'cancelled' rather than deleting, so the record stays available for
+// reporting; the admin lists filter cancelled rows out.
+export async function cancelLeaveRequest(id: string, reason?: string): Promise<void> {
+  const { error } = await client().rpc("cancel_leave_request", {
+    p_request_id: id,
+    p_reason: reason?.trim() || null,
+  });
+  if (error) throw error;
+}
+
 export async function reviewLeaveRequest(id: string, status: "approved" | "rejected", comment?: string) {
   const { data, error } = await client().rpc("review_leave_request", { p_request_id: id, p_status: status, p_comment: comment ?? null });
   if (error) throw error;

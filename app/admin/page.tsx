@@ -13,6 +13,7 @@ import type { AttendanceEventType, Profile } from "../../lib/domain";
 import {
   addHoliday,
   assignAsset,
+  cancelLeaveRequest,
   createAsset,
   createAttendanceLocation,
   createEmployee,
@@ -1568,7 +1569,7 @@ function Leaves({
       {showTabs && view === "upcoming" ? (
         <UpcomingLeave />
       ) : showTabs && view === "decided" ? (
-        <DecidedLeave setNotice={setNotice} canOverride={canOverride} />
+        <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} />
       ) : isHrAdmin && view === "entitlements" ? (
         <LeaveEntitlements setNotice={setNotice} />
       ) : (
@@ -1578,7 +1579,11 @@ function Leaves({
   );
 }
 
-function DecidedLeave({ setNotice, canOverride }: NoticeProps & { canOverride: boolean }) {
+function DecidedLeave({
+  setNotice,
+  canOverride,
+  isHrAdmin,
+}: NoticeProps & { canOverride: boolean; isHrAdmin: boolean }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -1592,6 +1597,31 @@ function DecidedLeave({ setNotice, canOverride }: NoticeProps & { canOverride: b
   useEffect(() => {
     load();
   }, []);
+
+  async function cancel(row: AdminLeaveRequest) {
+    const refunds = row.status === "approved";
+    const reason = window.prompt(
+      `Cancel ${row.employeeName}'s ${row.leaveType} leave (${formatDate(row.startsOn)} – ${formatDate(row.endsOn)})?` +
+        (refunds ? "\n\nThe days go back to their balance." : "\n\nThis was rejected, so no days change hands.") +
+        "\n\nOptional reason for the record:",
+      "",
+    );
+    if (reason === null) return;
+    setBusyId(row.id);
+    try {
+      await cancelLeaveRequest(row.id, reason);
+      setNotice(
+        refunds
+          ? `${row.employeeName}'s leave was cancelled and the days returned to their balance.`
+          : `${row.employeeName}'s leave request was cancelled.`,
+      );
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't cancel the request."));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function override(row: AdminLeaveRequest, status: "approved" | "rejected") {
     const verb = status === "approved" ? "Approve" : "Reject";
@@ -1626,18 +1656,31 @@ function DecidedLeave({ setNotice, canOverride }: NoticeProps & { canOverride: b
           <span>{row.employeeName}</span>
           <span className="capitalize">{row.leaveType}</span>
           <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
-          {canOverride ? (
+          {canOverride || isHrAdmin ? (
             <span className="row-actions">
               <span className={`pill ${leaveStatusClass(row.status)}`}>{row.status}</span>
-              <button
-                className={`icon-action ${row.status === "approved" ? "reject" : "approve"}`}
-                disabled={busyId === row.id}
-                onClick={() => override(row, row.status === "approved" ? "rejected" : "approved")}
-                aria-label={`Change ${row.employeeName}'s leave to ${row.status === "approved" ? "rejected" : "approved"}`}
-                title={row.status === "approved" ? "Reverse to rejected" : "Reverse to approved"}
-              >
-                <Icon name="swap" size={15} />
-              </button>
+              {canOverride && (
+                <button
+                  className={`icon-action ${row.status === "approved" ? "reject" : "approve"}`}
+                  disabled={busyId === row.id}
+                  onClick={() => override(row, row.status === "approved" ? "rejected" : "approved")}
+                  aria-label={`Change ${row.employeeName}'s leave to ${row.status === "approved" ? "rejected" : "approved"}`}
+                  title={row.status === "approved" ? "Reverse to rejected" : "Reverse to approved"}
+                >
+                  <Icon name="swap" size={15} />
+                </button>
+              )}
+              {isHrAdmin && (
+                <button
+                  className="icon-action reject"
+                  disabled={busyId === row.id}
+                  onClick={() => cancel(row)}
+                  aria-label={`Cancel ${row.employeeName}'s leave`}
+                  title={row.status === "approved" ? "Cancel and return the days" : "Cancel this request"}
+                >
+                  <Icon name="trash" size={15} />
+                </button>
+              )}
             </span>
           ) : (
             <span className={`pill ${leaveStatusClass(row.status)}`}>{row.status}</span>

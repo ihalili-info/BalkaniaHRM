@@ -51,6 +51,9 @@ const stateLabels: Record<AttendanceState, string> = {
 // held in front of the camera isn't processed repeatedly.
 const SCAN_COOLDOWN_MS = 4000;
 
+// How long staff must hold the logo on the action screen to unpair the kiosk.
+const UNPAIR_HOLD_MS = 5000;
+
 type Phase ="loading" | "pairing" | "select-action" | "scanning";
 type CameraError = "denied" | "no-camera" | null;
 
@@ -125,6 +128,21 @@ export default function KioskPage() {
     } finally {
       setPairing(false);
     }
+  }
+
+  const unpairHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function startUnpairHold() {
+    cancelUnpairHold();
+    unpairHoldRef.current = setTimeout(() => {
+      unpairHoldRef.current = null;
+      if (window.confirm("Unpair this kiosk? A new PIN from Balkania Admin will be needed to pair it again.")) backToPairing("");
+    }, UNPAIR_HOLD_MS);
+  }
+
+  function cancelUnpairHold() {
+    if (unpairHoldRef.current) clearTimeout(unpairHoldRef.current);
+    unpairHoldRef.current = null;
   }
 
   function chooseAction(action: AttendanceEventType) {
@@ -255,7 +273,20 @@ export default function KioskPage() {
     return (
       <main className="kiosk kiosk-center kiosk-light">
         <div className="kiosk-pair-card kiosk-action-card">
-          <img src="/icon-color.png" alt="Balkania" className="kiosk-logo" />
+          {/* Hidden staff escape hatch: hold the logo for 5s to unpair. There is
+              deliberately no visible button -- employees use this screen all day.
+              The normal route is deleting the device under Kiosk devices in admin. */}
+          <img
+            src="/icon-color.png"
+            alt="Balkania"
+            className="kiosk-logo"
+            draggable={false}
+            onPointerDown={startUnpairHold}
+            onPointerUp={cancelUnpairHold}
+            onPointerLeave={cancelUnpairHold}
+            onPointerCancel={cancelUnpairHold}
+            onContextMenu={(e) => e.preventDefault()}
+          />
           <h1>What are you recording?</h1>
           <p className="kiosk-muted">Choose an action, then scan each employee&apos;s code.</p>
           <div className="kiosk-action-grid">
@@ -272,16 +303,6 @@ export default function KioskPage() {
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            className="kiosk-muted"
-            style={{ background: "none", border: 0, textDecoration: "underline", cursor: "pointer", marginTop: 16 }}
-            onClick={() => {
-              if (window.confirm("Unpair this device? You'll need a PIN to pair it again.")) backToPairing("");
-            }}
-          >
-            Unpair this device
-          </button>
         </div>
       </main>
     );

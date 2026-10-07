@@ -923,8 +923,9 @@ function AddEmployeeModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <h2>Add employee</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
-        <p className="muted small">Creates a profile and sends a Supabase auth invite email so they can set their password. Employee code is generated automatically.</p>
+        <p className="muted small">Creates a profile and emails an invite so they can set their password. Employee code is generated automatically.</p>
         <form className="admin-login-form" onSubmit={handleSubmit}>
+          <h3 className="form-section">Employment</h3>
           <label>
             Full name
             <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
@@ -955,26 +956,28 @@ function AddEmployeeModal({ onClose, onCreated }: { onClose: () => void; onCreat
             </label>
           )}
           <label>
-            Attendance location (optional)
+            Start date
+            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
+            <small className="field-hint">Leave accrues from this date — use their actual first day.</small>
+          </label>
+          <label>
+            Attendance location <span className="field-optional">optional</span>
             <select value={attendanceLocationId} onChange={(e) => setAttendanceLocationId(e.target.value)} disabled={saving}>
               <option value="">Unassigned</option>
               {attendanceLocations.map((l) => (
                 <option key={l.id} value={l.id}>{l.name}</option>
               ))}
             </select>
+            <small className="field-hint">Needed for &quot;office&quot; clock-in from the app, to confirm they&apos;re nearby.</small>
           </label>
-          <p className="muted small">Needed for direct PWA clock-in as "office" — required to confirm the employee is nearby.</p>
           <label className="checkbox-row">
             <input type="checkbox" checked={selfServiceAttendance} onChange={(e) => setSelfServiceAttendance(e.target.checked)} disabled={saving} />
-            Allow self-service clock-in (skip the kiosk)
+            <span>
+              Allow self-service clock-in (skip the kiosk)
+              <small className="field-hint">Off by default — everyone else clocks in at the shared kiosk. Turn on for remote or trusted staff.</small>
+            </span>
           </label>
-          <p className="muted small">Off by default — everyone else must clock in at the shared kiosk. Turn this on for remote or trusted staff who should clock in from the app instead.</p>
-          <label>
-            Start date
-            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
-          </label>
-          <p className="muted small">Leave accrues from this date, not from before it — set it to their actual first day.</p>
-          <p className="muted small">Personal details (optional — can be completed later)</p>
+          <h3 className="form-section">Personal details <span className="field-optional">optional — can be completed later</span></h3>
           <label>
             PPS number
             <input value={ppsNumber} onChange={(e) => setPpsNumber(e.target.value)} disabled={saving} placeholder="1234567A" />
@@ -1083,6 +1086,7 @@ function EditEmployeeModal({
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
         <form className="admin-login-form" onSubmit={handleSubmit}>
+          <h3 className="form-section">Employment</h3>
           <label>
             Full name
             <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
@@ -1111,24 +1115,28 @@ function EditEmployeeModal({
             </select>
           </label>
           <label>
-            Attendance location
+            Start date
+            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
+            <small className="field-hint">Leave accrues from this date.</small>
+          </label>
+          <label>
+            Attendance location <span className="field-optional">optional</span>
             <select value={attendanceLocationId} onChange={(e) => setAttendanceLocationId(e.target.value)} disabled={saving}>
               <option value="">Unassigned</option>
               {attendanceLocations.map((l) => (
                 <option key={l.id} value={l.id}>{l.name}</option>
               ))}
             </select>
+            <small className="field-hint">Needed for &quot;office&quot; clock-in from the app.</small>
           </label>
           <label className="checkbox-row">
             <input type="checkbox" checked={selfServiceAttendance} onChange={(e) => setSelfServiceAttendance(e.target.checked)} disabled={saving} />
-            Allow self-service clock-in (skip the kiosk)
+            <span>
+              Allow self-service clock-in (skip the kiosk)
+              <small className="field-hint">Off by default — everyone else clocks in at the shared kiosk.</small>
+            </span>
           </label>
-          <label>
-            Start date
-            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
-          </label>
-          <p className="muted small">Leave accrues from this date, not from before it.</p>
-          <p className="muted small">Personal details</p>
+          <h3 className="form-section">Personal details</h3>
           <label>
             PPS number
             <input value={ppsNumber} onChange={(e) => setPpsNumber(e.target.value)} disabled={saving} placeholder="1234567A" />

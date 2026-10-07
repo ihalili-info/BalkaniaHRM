@@ -87,7 +87,7 @@ export default function KioskPage() {
     clearKioskSession();
     setSession(null);
     setSelectedAction(null);
-    setReauthBanner(message);
+    setReauthBanner(message || null);
     setPhase("pairing");
   }
 
@@ -257,6 +257,16 @@ export default function KioskPage() {
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            className="kiosk-muted"
+            style={{ background: "none", border: 0, textDecoration: "underline", cursor: "pointer", marginTop: 16 }}
+            onClick={() => {
+              if (window.confirm("Unpair this device? You'll need a PIN to pair it again.")) backToPairing("");
+            }}
+          >
+            Unpair this device
+          </button>
         </div>
       </main>
     );

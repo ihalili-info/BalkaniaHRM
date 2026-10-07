@@ -461,6 +461,7 @@ function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
 
 function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
   const [rows, setRows] = useState<AdminEmployee[] | null>(null);
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [tab, setTab] = useState<"active" | "former">("active");
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -472,11 +473,25 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
     listEmployees()
       .then((data) => setRows(data))
       .catch((err) => setError(errorMessage(err, "Couldn't load employees.")));
+    // Teams are only used to show every team a manager oversees, so a failure
+    // here just falls back to the single team on the profile.
+    listTeams()
+      .then(setTeams)
+      .catch(() => setTeams([]));
   }
 
   useEffect(() => {
     load();
   }, []);
+
+  // A manager can manage several teams (teams.manager_id), while profiles.team_id
+  // holds only the one team they sit on. Show all of them, own team first.
+  function teamLabel(row: AdminEmployee): string {
+    if (row.role !== "manager") return row.teamName ?? "—";
+    const names = teams.filter((t) => t.managerId === row.id).map((t) => t.name);
+    if (row.teamName && !names.includes(row.teamName)) names.unshift(row.teamName);
+    return names.length > 0 ? names.join(", ") : "—";
+  }
 
   const visibleRows = rows?.filter((row) => (tab === "active" ? row.active : !row.active)) ?? null;
 
@@ -490,7 +505,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
       downloadCsv(
         `employees-${new Date().toISOString().slice(0, 10)}.csv`,
         ["Full name", "Employee code", "Role", "Team", "Status"],
-        rows.map((row) => [row.fullName, row.employeeCode, row.role, row.teamName ?? "", row.active ? "Active" : "Former"]),
+        rows.map((row) => [row.fullName, row.employeeCode, row.role, teamLabel(row) === "—" ? "" : teamLabel(row), row.active ? "Active" : "Former"]),
       );
     } finally {
       setExporting(false);
@@ -618,7 +633,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
               </span>
               <span>{row.employeeCode}</span>
               <span className="capitalize">{row.role.replace("_", " ")}</span>
-              <span>{row.teamName ?? "—"}</span>
+              <span>{teamLabel(row)}</span>
               <span className="row-actions">
                 <button
                   className="icon-action"

@@ -9,6 +9,7 @@ import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../
 import { errorMessage } from "../../lib/errors";
 import { recordAttendance } from "../../lib/attendance-service";
 import { downloadCsv } from "../../lib/csv";
+import { importEmployees, parseEmployeeRows, readEmployeeSheet, type ImportOutcome, type ImportRow } from "../../lib/employee-import";
 import type { AttendanceEventType, Profile } from "../../lib/domain";
 import {
   addHoliday,
@@ -465,6 +466,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
   const [tab, setTab] = useState<"active" | "former">("active");
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<AdminEmployee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -579,7 +581,15 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
         onAction={isHrAdmin ? () => setShowAddModal(true) : undefined}
         onExport={handleExport}
         exporting={exporting}
+        onImport={isHrAdmin ? () => setShowImportModal(true) : undefined}
       />
+      {showImportModal && (
+        <ImportEmployeesModal
+          existingNames={rows?.map((r) => r.fullName) ?? []}
+          onClose={() => setShowImportModal(false)}
+          onDone={() => load()}
+        />
+      )}
       {isHrAdmin && (
         <div className="module-tabs">
           <button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Active</button>
@@ -668,6 +678,137 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
         </section>
       )}
     </>
+  );
+}
+
+function ImportEmployeesModal({
+  existingNames,
+  onClose,
+  onDone,
+}: {
+  existingNames: string[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [rows, setRows] = useState<ImportRow[] | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [outcomes, setOutcomes] = useState<ImportOutcome[] | null>(null);
+
+  async function handleFile(file: File) {
+    setFileError(null);
+    setRows(null);
+    try {
+      const [sheet, teams] = await Promise.all([readEmployeeSheet(file), listTeams()]);
+      const parsed = parseEmployeeRows(sheet, teams, existingNames);
+      if (parsed.length === 0) throw new Error("No employee rows found in the file.");
+      setRows(parsed);
+      // Rows that may duplicate an existing person start unticked so including them is a conscious choice.
+      setSelected(new Set(parsed.filter((r) => r.errors.length === 0 && !r.warnings.some((w) => w.includes("already in the directory"))).map((r) => r.rowNumber)));
+    } catch (err) {
+      setFileError(errorMessage(err, "Couldn't read that file. Use an .xlsx file."));
+    }
+  }
+
+  function toggle(rowNumber: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowNumber)) next.delete(rowNumber);
+      else next.add(rowNumber);
+      return next;
+    });
+  }
+
+  async function handleImport() {
+    if (!rows) return;
+    const chosen = rows.filter((r) => selected.has(r.rowNumber) && r.errors.length === 0);
+    if (chosen.length === 0) return;
+    if (!window.confirm(`Create ${chosen.length} employee${chosen.length === 1 ? "" : "s"} and email each of them an invite to set their password? Emails are sent immediately and can't be recalled.`)) return;
+    setProgress({ done: 0, total: chosen.length });
+    const results = await importEmployees(chosen, (done, total) => setProgress({ done, total }));
+    setOutcomes(results);
+    setProgress(null);
+    onDone();
+  }
+
+  const importing = progress !== null;
+  const selectedCount = rows?.filter((r) => selected.has(r.rowNumber) && r.errors.length === 0).length ?? 0;
+  const failed = outcomes?.filter((o) => !o.ok) ?? [];
+
+  return (
+    <div className="admin-modal-overlay" onClick={importing ? undefined : onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>Import employees</h2>
+          <button className="icon-action" onClick={onClose} disabled={importing} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+
+        {outcomes ? (
+          <>
+            <p>
+              <b>{outcomes.length - failed.length}</b> invited{failed.length > 0 && <>, <b>{failed.length}</b> failed</>}.
+            </p>
+            {failed.length > 0 && (
+              <ul className="import-list">
+                {failed.map((o) => (
+                  <li key={o.row.rowNumber}>Row {o.row.rowNumber} — {o.row.fullName} ({o.row.email}): {o.message}</li>
+                ))}
+              </ul>
+            )}
+            <div className="admin-modal-actions">
+              <button className="primary-admin" onClick={onClose}>Done</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="muted small">
+              Upload an .xlsx file with a heading row. Used columns: Name &amp; Surname (or Name + Surname), Email, Team, Start Date, Date of Birth, Phone Number, Address, City.
+              Everyone is added as an Employee; other columns (gender, age, leave balances) are ignored.
+            </p>
+            <input
+              type="file"
+              accept=".xlsx"
+              disabled={importing}
+              onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+            />
+            {fileError && <p className="form-error"><Icon name="warning" size={14} />{fileError}</p>}
+
+            {rows && (
+              <>
+                <p className="muted small">
+                  {rows.length} rows read · {rows.filter((r) => r.errors.length > 0).length} with errors (can&apos;t be imported) · {selectedCount} selected
+                </p>
+                <div className="import-table">
+                  {rows.map((r) => (
+                    <label key={r.rowNumber} className={`import-row${r.errors.length ? " has-error" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(r.rowNumber) && r.errors.length === 0}
+                        disabled={r.errors.length > 0 || importing}
+                        onChange={() => toggle(r.rowNumber)}
+                      />
+                      <span>
+                        <b>{r.fullName || "(no name)"}</b> · {r.email || "(no email)"} · {r.teamName || "no team"}
+                        {r.errors.map((m) => <em key={m} className="import-error"> {m}.</em>)}
+                        {r.warnings.map((m) => <em key={m} className="import-warning"> {m}.</em>)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div className="admin-modal-actions">
+              <button type="button" className="outline-button" onClick={onClose} disabled={importing}>Cancel</button>
+              <button className="primary-admin" onClick={handleImport} disabled={importing || selectedCount === 0}>
+                {importing ? `Inviting ${progress!.done}/${progress!.total}…` : `Import ${selectedCount || ""} & send invites`}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -3930,6 +4071,7 @@ function Toolbar({
   onAction,
   onExport,
   exporting,
+  onImport,
 }: {
   // Optional so a module can render the toolbar without a primary action --
   // e.g. the staff directory for supervisors, who may look but not add.
@@ -3937,6 +4079,7 @@ function Toolbar({
   onAction?: () => void;
   onExport?: () => void;
   exporting?: boolean;
+  onImport?: () => void;
 }) {
   return (
     <div className="toolbar">
@@ -3945,6 +4088,11 @@ function Toolbar({
       {onExport && (
         <button className="outline-button" onClick={onExport} disabled={exporting}>
           <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export"}
+        </button>
+      )}
+      {onImport && (
+        <button className="outline-button" onClick={onImport}>
+          <Icon name="upload" size={15} /> Import
         </button>
       )}
       {action && onAction && (

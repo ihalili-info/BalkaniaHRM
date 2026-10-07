@@ -202,3 +202,12 @@
 @media (max-width: 700px) {
   .admin-modal.wide .admin-login-form { grid-template-columns: 1fr; }
 }
+
+/* Import employees */
+.import-table { max-height: 340px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 10px; margin-top: 10px; }
+.import-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border-bottom: 1px solid #eef2f7; font-size: 13px; font-weight: 400; margin: 0; }
+.import-row input { width: auto; margin: 3px 0 0; }
+.import-row.has-error { background: #fff5f5; }
+.import-error { color: #b42318; font-style: normal; }
+.import-warning { color: #92600a; font-style: normal; }
+.import-list { font-size: 13px; padding-left: 18px; max-height: 240px; overflow-y: auto; }

@@ -189,3 +189,16 @@
   .table-head.cols-6 b:nth-child(n+2):nth-child(-n+5), .table-row.cols-6 span:nth-child(n+2):nth-child(-n+5),
   .table-head.cols-8 b:nth-child(n+2):nth-child(-n+7), .table-row.cols-8 span:nth-child(n+2):nth-child(-n+7) { display: none; }
 }
+
+/* Wide two-column employee form (Add / Edit employee). */
+.admin-modal.wide { max-width: 860px; }
+.admin-modal.wide .admin-login-form { max-width: none; display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; }
+.admin-modal.wide .admin-login-form > p,
+.admin-modal.wide .admin-login-form > .checkbox-row,
+.admin-modal.wide .admin-login-form > .form-error,
+.admin-modal.wide .admin-login-form > .admin-modal-actions,
+.admin-modal.wide .admin-login-form > label:has(textarea) { grid-column: 1 / -1; }
+.admin-modal.wide .admin-login-form > p { margin: 6px 0 0; }
+@media (max-width: 700px) {
+  .admin-modal.wide .admin-login-form { grid-template-columns: 1fr; }
+}

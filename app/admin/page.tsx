@@ -733,7 +733,7 @@ function AddEmployeeModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
   return (
     <div className="admin-modal-overlay" onClick={onClose}>
-      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
           <h2>Add employee</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
@@ -892,7 +892,7 @@ function EditEmployeeModal({
 
   return (
     <div className="admin-modal-overlay" onClick={onClose}>
-      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
           <h2>Edit employee</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>

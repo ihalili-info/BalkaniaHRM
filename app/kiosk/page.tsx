@@ -47,7 +47,11 @@ const stateLabels: Record<AttendanceState, string> = {
   complete: "done for the day",
 };
 
-type Phase = "loading" | "pairing" | "select-action" | "scanning";
+// How long the same QR token is ignored after it was last handled, so a code
+// held in front of the camera isn't processed repeatedly.
+const SCAN_COOLDOWN_MS = 4000;
+
+type Phase ="loading" | "pairing" | "select-action" | "scanning";
 type CameraError = "denied" | "no-camera" | null;
 
 export default function KioskPage() {
@@ -67,6 +71,7 @@ export default function KioskPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const scannerRef = useRef<QrScanner | null>(null);
   const busyRef = useRef(false);
+  const lastScanRef = useRef<{ token: string; at: number } | null>(null);
 
   useEffect(() => {
     const existing = loadKioskSession();
@@ -111,7 +116,13 @@ export default function KioskPage() {
 
   async function handleDecoded(qrToken: string) {
     if (busyRef.current || !session || !selectedAction) return;
+    // The scanner keeps decoding the same code every frame while it stays in view.
+    // Without this, the second decode lands after the first recorded successfully,
+    // sees the employee in their new state, and flashes a spurious red error.
+    const last = lastScanRef.current;
+    if (last && last.token === qrToken && Date.now() - last.at < SCAN_COOLDOWN_MS) return;
     busyRef.current = true;
+    lastScanRef.current = { token: qrToken, at: Date.now() };
     try {
       const identified = await identifyEmployee(session.sessionToken, qrToken);
       if (!identified.validActions.includes(selectedAction)) {
@@ -130,6 +141,8 @@ export default function KioskPage() {
       setScanMessage(kioskErrorMessage(err));
       setTimeout(() => setScanMessage(null), 2500);
     } finally {
+      // Restart the cooldown from when processing finished, not when it started.
+      if (lastScanRef.current) lastScanRef.current.at = Date.now();
       busyRef.current = false;
     }
   }

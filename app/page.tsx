@@ -916,6 +916,7 @@ function ProfileScreen({
   onDocuments: () => void;
   onChangePassword: () => void;
 }) {
+  const locationPermission = useLocationPermission();
   return (
     <>
       <h1>Profile</h1>
@@ -929,10 +930,10 @@ function ProfileScreen({
         </div>
       </section>
       <section className="settings">
-        <Setting label="Language" value="English" icon="settings" />
-        <Setting label="Notifications" value="On" icon="bell" />
-        <Setting label="Location" value="Off" icon="calendar" />
-        <Setting label="Camera permission" value="Not granted" icon="qr" />
+        {/* Only real settings here. Language, notifications and camera used to be
+            listed with hard-coded values, but the app has no language switch, sends
+            no push notifications, and never uses the camera (the kiosk scans). */}
+        <Setting label="Location access" value={locationPermission} icon="building" />
         <Setting label="Change password" value="" icon="lock" chevron onClick={onChangePassword} />
         <Setting label="Documents" value="" icon="archive" chevron onClick={onDocuments} />
       </section>
@@ -1207,6 +1208,36 @@ function Setting({
       {chevron ? <Icon name="chevronRight" size={16} className="muted-icon" /> : <b>{value}</b>}
     </button>
   );
+}
+
+// The browser's actual geolocation permission, used for "office" clock-in.
+// Falls back to "Asked when needed" where the Permissions API isn't available
+// (older iOS Safari), since the prompt then appears on first office clock-in.
+function useLocationPermission(): string {
+  const [label, setLabel] = useState("Checking…");
+  useEffect(() => {
+    const labels: Record<PermissionState, string> = { granted: "Allowed", denied: "Blocked", prompt: "Asked when needed" };
+    if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
+      setLabel("Not supported");
+      return;
+    }
+    if (!navigator.permissions?.query) {
+      setLabel("Asked when needed");
+      return;
+    }
+    let status: PermissionStatus | null = null;
+    const update = () => status && setLabel(labels[status.state]);
+    navigator.permissions
+      .query({ name: "geolocation" })
+      .then((s) => {
+        status = s;
+        update();
+        s.addEventListener("change", update);
+      })
+      .catch(() => setLabel("Asked when needed"));
+    return () => status?.removeEventListener("change", update);
+  }, []);
+  return label;
 }
 
 // ---- formatting & derived-state helpers ----

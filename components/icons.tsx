@@ -15,6 +15,7 @@ const paths: Record<string, string> = {
   device: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm5 15h2",
   download: "M12 4v11m0 0-4-4m4 4 4-4M5 20h14",
   upload: "M12 15V4m0 0-4 4m4-4 4 4M5 20h14",
+  menu: "M4 6h16M4 12h16M4 18h16",
   search: "m21 21-4.3-4.3M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z",
   filter: "M4 6h16M7 12h10M10 18h4",
   check: "m5 13 4 4L19 7",

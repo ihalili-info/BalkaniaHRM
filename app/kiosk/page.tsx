@@ -64,7 +64,25 @@ export default function KioskPage() {
   const [manualEntryOpen, setManualEntryOpen] = useState(false);
   const [manualToken, setManualToken] = useState("");
   const [scanMessage, setScanMessage] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [success, setSuccess] = useState<{ name: string; action: AttendanceEventType; at: Date } | null>(null);
+  // One shared timer so a new result replaces the previous one cleanly instead
+  // of an older timeout clearing a newer message early.
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showFeedback(next: { error: string } | { name: string; action: AttendanceEventType }) {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    if ("error" in next) {
+      setSuccess(null);
+      setScanMessage(next.error);
+    } else {
+      setScanMessage(null);
+      setSuccess({ ...next, at: new Date() });
+    }
+    feedbackTimerRef.current = setTimeout(() => {
+      setScanMessage(null);
+      setSuccess(null);
+    }, "error" in next ? 3500 : 2000);
+  }
   const [cameraError, setCameraError] = useState<CameraError>(null);
   const [reauthBanner, setReauthBanner] = useState<string | null>(null);
 
@@ -126,20 +144,17 @@ export default function KioskPage() {
     try {
       const identified = await identifyEmployee(session.sessionToken, qrToken);
       if (!identified.validActions.includes(selectedAction)) {
-        setScanMessage(`${identified.fullName} is ${stateLabels[identified.state]} — can't ${eventLabels[selectedAction].toLowerCase()}.`);
-        setTimeout(() => setScanMessage(null), 3000);
+        showFeedback({ error: `${identified.fullName} is ${stateLabels[identified.state]} — can't ${eventLabels[selectedAction].toLowerCase()}.` });
         return;
       }
       await recordKioskAttendance(session.sessionToken, identified.employeeId, selectedAction, crypto.randomUUID());
-      setSuccessMessage(`${eventLabels[selectedAction]} recorded for ${identified.fullName}.`);
-      setTimeout(() => setSuccessMessage(null), 2200);
+      showFeedback({ name: identified.fullName, action: selectedAction });
     } catch (err) {
       if (isKioskSessionInvalidError(err)) {
         backToPairing(kioskErrorMessage(err));
         return;
       }
-      setScanMessage(kioskErrorMessage(err));
-      setTimeout(() => setScanMessage(null), 2500);
+      showFeedback({ error: kioskErrorMessage(err) });
     } finally {
       // Restart the cooldown from when processing finished, not when it started.
       if (lastScanRef.current) lastScanRef.current.at = Date.now();
@@ -301,10 +316,21 @@ export default function KioskPage() {
               <p>No camera was found on this device. Use the manual entry below instead.</p>
             </div>
           )}
-          {scanMessage && <div className="kiosk-toast kiosk-toast-error">{scanMessage}</div>}
-          {successMessage && (
-            <div className="kiosk-toast kiosk-toast-success">
-              <Icon name="check" size={16} /> {successMessage}
+          {/* Readable from a metre away: a full-screen confirmation the person
+              can't miss, rather than a small pill at the top of the camera view. */}
+          {success && (
+            <div className="kiosk-result kiosk-result-success" role="status" aria-live="polite">
+              <span className="kiosk-result-icon"><Icon name="check" size={56} strokeWidth={2.6} /></span>
+              <p className="kiosk-result-name">{success.name}</p>
+              <p className="kiosk-result-detail">
+                {eventLabels[success.action]} · {success.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </p>
+            </div>
+          )}
+          {scanMessage && (
+            <div className="kiosk-result kiosk-result-error" role="alert">
+              <span className="kiosk-result-icon"><Icon name="warning" size={44} strokeWidth={2.2} /></span>
+              <p className="kiosk-result-detail">{scanMessage}</p>
             </div>
           )}
         </div>

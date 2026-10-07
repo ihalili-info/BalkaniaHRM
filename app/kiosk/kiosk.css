@@ -352,3 +352,40 @@
   background: rgba(244, 245, 251, 0.06);
   color: var(--kiosk-ink);
 }
+
+/* Scan result. Success fills the camera view in green so it's obvious from a
+   distance; errors use a large centred card that leaves the camera visible. */
+.kiosk-result {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  animation: kiosk-result-in 0.16s ease-out;
+}
+.kiosk-result p { margin: 0; }
+.kiosk-result-icon { display: grid; place-items: center; width: 112px; height: 112px; border-radius: 50%; margin-bottom: 8px; }
+.kiosk-result-name { font-size: clamp(28px, 5vw, 44px); font-weight: 700; letter-spacing: -0.5px; }
+.kiosk-result-detail { font-size: clamp(18px, 2.6vw, 24px); font-weight: 600; max-width: 560px; }
+
+.kiosk-result-success { inset: 0; background: rgba(20, 128, 78, 0.94); color: #fff; }
+.kiosk-result-success .kiosk-result-icon { background: #fff; color: #14804e; }
+.kiosk-result-success .kiosk-result-detail { opacity: 0.92; }
+
+.kiosk-result-error {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100% - 48px));
+  padding: 28px 24px;
+  border-radius: 20px;
+  background: rgba(150, 18, 48, 0.95);
+  color: #fff;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.kiosk-result-error .kiosk-result-icon { width: 80px; height: 80px; background: rgba(255, 255, 255, 0.16); }
+
+@keyframes kiosk-result-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .kiosk-result { animation: none; } }

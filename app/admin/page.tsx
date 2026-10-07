@@ -303,6 +303,11 @@ function AdminLogin({ configured }: { configured: boolean }) {
 // and every HR-only action inside the module is gated on isHrAdmin.
 const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees"];
 
+// Modules that only render a "coming in a later release" placeholder. They're
+// kept out of the sidebar so the menu only offers things that work; drop an
+// entry from this list once its module ships.
+const UNBUILT_MODULES: Module[] = ["organization", "documents", "training", "recruitment", "performance", "integrations"];
+
 function AdminShell({ profile }: { profile: Profile }) {
   // Team leads get the same portal view as managers, scoped by RLS to their
   // own team. What differs is authority, not navigation: only a manager can
@@ -313,11 +318,26 @@ function AdminShell({ profile }: { profile: Profile }) {
   const visibleGroups = moduleGroups
     .map((group) => ({
       label: group.label,
-      items: isSupervisor ? group.items.filter(([id]) => MANAGER_MODULES.includes(id)) : group.items,
+      items: group.items.filter(([id]) => !UNBUILT_MODULES.includes(id) && (!isSupervisor || MANAGER_MODULES.includes(id))),
     }))
     .filter((group) => group.items.length > 0);
-  const [module, setModule] = useState<Module>(visibleGroups[0].items[0][0]);
+  const [module, setModuleState] = useState<Module>(visibleGroups[0].items[0][0]);
   const [notice, setNotice] = useState("");
+  // Below 800px the sidebar becomes an off-canvas drawer opened from the top bar.
+  const [navOpen, setNavOpen] = useState(false);
+  const currentGroup = moduleGroups.find((group) => group.items.some(([id]) => id === module));
+
+  function setModule(next: Module) {
+    setModuleState(next);
+    setNavOpen(false);
+  }
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setNavOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
 
   useEffect(() => {
     if (!notice) return;
@@ -326,14 +346,26 @@ function AdminShell({ profile }: { profile: Profile }) {
   }, [notice]);
 
   return (
-    <main className="admin-shell">
-      <aside className="admin-sidebar">
+    <main className={`admin-shell${navOpen ? " nav-open" : ""}`}>
+      <div className="admin-topbar">
+        <button className="admin-menu-button" onClick={() => setNavOpen(true)} aria-label="Open menu" aria-expanded={navOpen}>
+          <Icon name="menu" size={20} />
+        </button>
         <div className="admin-brand"><img src="/icon-white.png" alt="" /><b>Balkania</b></div>
+      </div>
+      {navOpen && <div className="admin-nav-scrim" onClick={() => setNavOpen(false)} />}
+      <aside className="admin-sidebar">
+        <div className="admin-sidebar-head">
+          <div className="admin-brand"><img src="/icon-white.png" alt="" /><b>Balkania</b></div>
+          <button className="admin-menu-button admin-menu-close" onClick={() => setNavOpen(false)} aria-label="Close menu">
+            <Icon name="x" size={18} />
+          </button>
+        </div>
         {visibleGroups.map((group) => (
           <div className="sidebar-group" key={group.label}>
             <p>{group.label}</p>
             {group.items.map(([id, label, icon]) => (
-              <button key={id} className={module === id ? "active" : ""} onClick={() => setModule(id)}>
+              <button key={id} className={module === id ? "active" : ""} aria-current={module === id ? "page" : undefined} onClick={() => setModule(id)}>
                 <Icon name={icon} size={17} />
                 {label}
               </button>
@@ -353,11 +385,11 @@ function AdminShell({ profile }: { profile: Profile }) {
       <section className="admin-main">
         <header className="admin-header">
           <div>
-            <p className="eyebrow">BALKANIA ADMIN</p>
+            {currentGroup && currentGroup.label !== "MAIN" && <p className="eyebrow">{currentGroup.label}</p>}
             <h1>{modules.find(([id]) => id === module)?.[1]}</h1>
           </div>
           <div className="admin-actions">
-            <button className="avatar">{initials(profile.fullName)}</button>
+            <span className="avatar" title={`Signed in as ${profile.fullName}`}>{initials(profile.fullName)}</span>
           </div>
         </header>
         {notice && <p className="admin-notice">{notice}</p>}
@@ -467,6 +499,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [search, setSearch] = useState("");
   const [editingEmployee, setEditingEmployee] = useState<AdminEmployee | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -495,7 +528,10 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
     return names.length > 0 ? names.join(", ") : "—";
   }
 
-  const visibleRows = rows?.filter((row) => (tab === "active" ? row.active : !row.active)) ?? null;
+  const visibleRows =
+    rows?.filter(
+      (row) => (tab === "active" ? row.active : !row.active) && matchesSearch(search, row.fullName, row.employeeCode, row.role.replace("_", " "), teamLabel(row)),
+    ) ?? null;
 
   function handleExport() {
     if (!rows || rows.length === 0) {
@@ -582,6 +618,9 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
         onExport={handleExport}
         exporting={exporting}
         onImport={isHrAdmin ? () => setShowImportModal(true) : undefined}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search name, code, role or team"
       />
       {showImportModal && (
         <ImportEmployeesModal
@@ -622,18 +661,23 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
       ) : !visibleRows ? (
         <LoadingPanel />
       ) : visibleRows.length === 0 ? (
-        <EmptyPanel
-          icon="users"
-          title={tab === "active" ? "No employees yet" : "No former employees"}
-          note={tab === "active" ? "Add or import employees to see them here." : "Deactivated employees will appear here."}
-        />
+        search.trim() ? (
+          <EmptyPanel icon="search" title="No matches" note={`No employees match "${search.trim()}".`} />
+        ) : (
+          <EmptyPanel
+            icon="users"
+            title={tab === "active" ? "No employees yet" : "No former employees"}
+            note={tab === "active" ? "Add or import employees to see them here." : "Deactivated employees will appear here."}
+          />
+        )
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Employee</b><b>Code</b><b>Role</b><b>Team</b><b>Actions</b></div>
+          <div className="table-head cols-5"><b>Employee</b><b>Code</b><b>Role</b><b>Team</b><b className="actions-head">Actions</b></div>
           {visibleRows.map((row) => (
             <div className="table-row cols-5" key={row.id}>
-              <span>
-                <i className="person-dot">{row.fullName[0]}</i>{row.fullName}
+              <span className="person-cell">
+                <i className="person-dot">{row.fullName[0]}</i>
+                <span className="person-name">{row.fullName}</span>
                 {!row.active && <span className="pill">Inactive</span>}
                 {isHrAdmin && !row.active && (
                   <button className="purge-link" disabled={busyId === row.id} onClick={() => handlePurge(row)}>
@@ -643,7 +687,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
               </span>
               <span>{row.employeeCode}</span>
               <span className="capitalize">{row.role.replace("_", " ")}</span>
-              <span>{teamLabel(row)}</span>
+              <span className="team-cell">{teamLabel(row)}</span>
               <span className="row-actions">
                 <button
                   className="icon-action"
@@ -1122,6 +1166,7 @@ function Teams({ setNotice }: NoticeProps) {
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [editingTeam, setEditingTeam] = useState<AdminTeam | null>(null);
+  const [search, setSearch] = useState("");
 
   function load() {
     Promise.all([listTeams(), listEmployees()])
@@ -1143,7 +1188,7 @@ function Teams({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Create team" onAction={() => setShowModal(true)} />
+      <Toolbar action="Create team" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search teams, leads or managers" />
       {showModal && (
         <CreateTeamModal
           onClose={() => setShowModal(false)}
@@ -1173,8 +1218,8 @@ function Teams({ setNotice }: NoticeProps) {
         <EmptyPanel icon="users" title="No teams yet" note="Create a team and assign a manager so employees can be added to it." />
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Team</b><b>Team lead</b><b>Manager</b><b>Members</b><b>Actions</b></div>
-          {teams.map((team) => (
+          <div className="table-head cols-5"><b>Team</b><b>Team lead</b><b>Manager</b><b>Members</b><b className="actions-head">Actions</b></div>
+          {teams.filter((team) => matchesSearch(search, team.name, team.teamLeadName, team.managerName)).map((team) => (
             <div className="table-row cols-5" key={team.id}>
               <span>{team.name}</span>
               <span>{team.teamLeadName ?? <span className="pill pending">No lead</span>}</span>
@@ -1973,7 +2018,7 @@ function LeaveRequests({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { 
         <EmptyPanel icon="calendar" title="No pending leave requests" note="New requests will appear here for review." />
       ) : (
         <section className="panel">
-          <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b>Actions</b></div>
+          <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b className="actions-head">Actions</b></div>
           {rows.map((row) => {
             const isOwnRequest = !isHrAdmin && row.employeeId === currentUserId;
             return (
@@ -2227,6 +2272,7 @@ const severityPillClass: Record<DisciplinarySeverity, string> = {
 
 function Disciplinary({ setNotice, canWithdraw }: NoticeProps & { canWithdraw: boolean }) {
   const [rows, setRows] = useState<AdminDisciplinaryAction[] | null>(null);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -2257,7 +2303,7 @@ function Disciplinary({ setNotice, canWithdraw }: NoticeProps & { canWithdraw: b
 
   return (
     <>
-      <Toolbar action="Issue action" onAction={() => setShowModal(true)} />
+      <Toolbar action="Issue action" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search employee or reason" />
       {showModal && (
         <IssueDisciplinaryModal
           onClose={() => setShowModal(false)}
@@ -2279,9 +2325,9 @@ function Disciplinary({ setNotice, canWithdraw }: NoticeProps & { canWithdraw: b
           <div className={`table-head ${canWithdraw ? "cols-5" : ""}`}>
             <b>Employee</b><b>Severity</b><b>Reason</b><b>Date</b>{canWithdraw && <b></b>}
           </div>
-          {rows.map((row) => (
+          {rows.filter((row) => matchesSearch(search, row.employeeName, row.reason, severityLabels[row.severity])).map((row) => (
             <div className={`table-row ${canWithdraw ? "cols-5" : ""}`} key={row.id}>
-              <span><i className="person-dot">{row.employeeName[0]}</i>{row.employeeName}</span>
+              <span className="person-cell"><i className="person-dot">{row.employeeName[0]}</i><span className="person-name">{row.employeeName}</span></span>
               <span><span className={`pill ${severityPillClass[row.severity]}`}>{severityLabels[row.severity]}</span></span>
               <span>{row.reason}</span>
               <span>{formatDate(row.occurredOn)}</span>
@@ -2731,6 +2777,7 @@ const assetStatusPill: Record<AssetStatus, string> = {
 
 function Assets({ setNotice }: NoticeProps) {
   const [rows, setRows] = useState<AdminAsset[] | null>(null);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [assigning, setAssigning] = useState<AdminAsset | null>(null);
@@ -2790,7 +2837,7 @@ function Assets({ setNotice }: NoticeProps) {
     }
   }
 
-  const visible = rows?.filter((r) => filter === "all" || r.status === filter) ?? null;
+  const visible = rows?.filter((r) => (filter === "all" || r.status === filter) && matchesSearch(search, r.name, r.assetTag, r.serialNumber, r.holderName, assetCategoryLabels[r.category])) ?? null;
   const counts = {
     total: rows?.length ?? 0,
     assigned: rows?.filter((r) => r.status === "assigned").length ?? 0,
@@ -2799,7 +2846,7 @@ function Assets({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Add asset" onAction={() => setShowCreate(true)} />
+      <Toolbar action="Add asset" onAction={() => setShowCreate(true)} search={search} onSearch={setSearch} searchPlaceholder="Search name, tag, serial or holder" />
       {showCreate && (
         <CreateAssetModal
           onClose={() => setShowCreate(false)}
@@ -2849,7 +2896,7 @@ function Assets({ setNotice }: NoticeProps) {
         />
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Asset</b><b>Tag</b><b>Assigned to</b><b>Status</b><b>Actions</b></div>
+          <div className="table-head cols-5"><b>Asset</b><b>Tag</b><b>Assigned to</b><b>Status</b><b className="actions-head">Actions</b></div>
           {visible.map((asset) => (
             <div className="table-row cols-5" key={asset.id}>
               <span className="asset-name">
@@ -3136,7 +3183,7 @@ function PayrollPeriods({ setNotice }: NoticeProps) {
         <EmptyPanel icon="creditCard" title="No payroll periods yet" note="Create a period to start generating payslips." />
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Period</b><b>Dates</b><b>Status</b><b>Payslips</b><b>Actions</b></div>
+          <div className="table-head cols-5"><b>Period</b><b>Dates</b><b>Status</b><b>Payslips</b><b className="actions-head">Actions</b></div>
           {rows.map((period) => (
             <div className="table-row cols-5" key={period.id}>
               <span>{period.label}</span>
@@ -3773,7 +3820,7 @@ function AttendanceLocations({ setNotice }: NoticeProps) {
         />
       ) : (
         <section className="panel">
-          <div className="table-head"><b>Location</b><b>Coordinates</b><b>Radius</b><b>Actions</b></div>
+          <div className="table-head"><b>Location</b><b>Coordinates</b><b>Radius</b><b className="actions-head">Actions</b></div>
           {rows.map((location) => (
             <div className="table-row" key={location.id}>
               <span>{location.name}</span>
@@ -4072,6 +4119,9 @@ function Toolbar({
   onExport,
   exporting,
   onImport,
+  search,
+  onSearch,
+  searchPlaceholder = "Search",
 }: {
   // Optional so a module can render the toolbar without a primary action --
   // e.g. the staff directory for supervisors, who may look but not add.
@@ -4080,11 +4130,21 @@ function Toolbar({
   onExport?: () => void;
   exporting?: boolean;
   onImport?: () => void;
+  // The search box only renders for modules that actually filter on it -- a
+  // search field that does nothing reads as a broken product.
+  search?: string;
+  onSearch?: (value: string) => void;
+  searchPlaceholder?: string;
 }) {
   return (
     <div className="toolbar">
-      <div className="search-input"><Icon name="search" size={15} /><input placeholder="Search" /></div>
-      <button className="outline-button"><Icon name="filter" size={15} /> Filters</button>
+      {onSearch && (
+        <div className="search-input">
+          <Icon name="search" size={15} />
+          <input type="search" placeholder={searchPlaceholder} aria-label={searchPlaceholder} value={search ?? ""} onChange={(e) => onSearch(e.target.value)} />
+        </div>
+      )}
+      <span className="toolbar-spacer" />
       {onExport && (
         <button className="outline-button" onClick={onExport} disabled={exporting}>
           <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export"}
@@ -4147,6 +4207,15 @@ function EmptyPanel({ icon, title, note }: { icon: Parameters<typeof Icon>[0]["n
       <p className="muted">{note}</p>
     </section>
   );
+}
+
+// Case-insensitive "every word appears somewhere" match across the given fields,
+// so "max ops" finds Max Murashov on the Operations team.
+function matchesSearch(query: string, ...fields: Array<string | null | undefined>) {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const haystack = fields.filter(Boolean).join(" ").toLowerCase();
+  return words.every((w) => haystack.includes(w));
 }
 
 function initials(name: string) {

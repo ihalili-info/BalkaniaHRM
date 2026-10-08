@@ -9,6 +9,33 @@ import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../
 import { errorMessage } from "../../lib/errors";
 import { recordAttendance } from "../../lib/attendance-service";
 import { downloadCsv } from "../../lib/csv";
+import {
+  CANDIDATE_STAGE_LABELS,
+  CANDIDATE_STAGES,
+  EMPLOYMENT_TYPE_LABELS,
+  JOB_STATUS_LABELS,
+  addCandidateNote,
+  createCandidate,
+  createJob,
+  deleteCandidate,
+  deleteCandidateNote,
+  getCandidateCvUrl,
+  linkHiredEmployee,
+  listCandidateNotes,
+  listCandidates,
+  listJobs,
+  setCandidateStage,
+  setJobArchived,
+  updateCandidate,
+  updateJob,
+  uploadCandidateCv,
+  type Candidate,
+  type CandidateNote,
+  type CandidateStage,
+  type EmploymentType,
+  type Job,
+  type JobStatus,
+} from "../../lib/recruitment-service";
 import { importEmployees, parseEmployeeRows, readEmployeeSheet, type ImportOutcome, type ImportRow } from "../../lib/employee-import";
 import type { AttendanceEventType, Profile } from "../../lib/domain";
 import {
@@ -302,12 +329,13 @@ function AdminLogin({ configured }: { configured: boolean }) {
 // "employees" is included so supervisors can reach the staff directory to send
 // password resets. RLS scopes the profiles they can read to their own people,
 // and every HR-only action inside the module is gated on isHrAdmin.
-const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees"];
+// "recruitment" shows supervisors only the jobs HR put them on the hiring team for (RLS).
+const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees", "recruitment"];
 
 // Modules that only render a "coming in a later release" placeholder. They're
 // kept out of the sidebar so the menu only offers things that work; drop an
 // entry from this list once its module ships.
-const UNBUILT_MODULES: Module[] = ["organization", "documents", "training", "recruitment", "performance", "integrations"];
+const UNBUILT_MODULES: Module[] = ["organization", "documents", "training", "performance", "integrations"];
 
 function AdminShell({ profile }: { profile: Profile }) {
   // Team leads get the same portal view as managers, scoped by RLS to their
@@ -409,7 +437,7 @@ function AdminShell({ profile }: { profile: Profile }) {
           <EmptyPanel icon="graduationCap" title="Training & Certifications" note="Course tracking and certification renewals are coming in a later release." />
         )}
         {module === "recruitment" && (
-          <EmptyPanel icon="userPlus" title="Recruitment" note="Job postings and candidate pipelines are coming in a later release." />
+          <Recruitment setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} currentUserId={profile.id} />
         )}
         {module === "attendance" && <Attendance setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
         {module === "timesheets" && <Timesheets setNotice={setNotice} />}
@@ -857,11 +885,20 @@ function ImportEmployeesModal({
   );
 }
 
-function AddEmployeeModal({ onClose, onCreated }: { onClose: () => void; onCreated: (employee: AdminEmployee) => void }) {
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
+function AddEmployeeModal({
+  onClose,
+  onCreated,
+  initial,
+}: {
+  onClose: () => void;
+  onCreated: (employee: AdminEmployee) => void;
+  // Pre-fill, e.g. when hiring a candidate from Recruitment.
+  initial?: { fullName?: string; email?: string; teamId?: string | null; phoneNumber?: string };
+}) {
+  const [fullName, setFullName] = useState(initial?.fullName ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
   const [role, setRole] = useState("employee");
-  const [teamId, setTeamId] = useState("");
+  const [teamId, setTeamId] = useState(initial?.teamId ?? "");
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [attendanceLocationId, setAttendanceLocationId] = useState("");
   const [attendanceLocations, setAttendanceLocations] = useState<AdminAttendanceLocation[]>([]);
@@ -869,7 +906,7 @@ function AddEmployeeModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [ppsNumber, setPpsNumber] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
-  const [phoneNumber, setPhoneNumber] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState(initial?.phoneNumber ?? "");
   const [address, setAddress] = useState("");
   const [placeOfBirth, setPlaceOfBirth] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -4149,6 +4186,849 @@ function Settings({ setNotice }: NoticeProps) {
       <Setting title="Audit log" text="Review sensitive platform activity" />
       <button className="primary-admin" onClick={() => setNotice("Settings persist directly to Supabase once the settings tables are added.")}>Save settings</button>
     </section>
+  );
+}
+
+// ---- Recruitment ----
+
+const jobStatusPill: Record<JobStatus, string> = { draft: "", open: "success", on_hold: "pending", closed: "danger" };
+
+// <input type="datetime-local"> works in local time without a zone; the DB stores timestamptz.
+function toLocalDateTimeInput(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fromLocalDateTimeInput(value: string): string | null {
+  return value ? new Date(value).toISOString() : null;
+}
+
+function formatDateTime(iso: string) {
+  return new Date(iso).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function Recruitment({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { isHrAdmin: boolean; currentUserId: string }) {
+  const [jobs, setJobs] = useState<Job[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"active" | "archived">("active");
+  const [search, setSearch] = useState("");
+  const [editingJob, setEditingJob] = useState<Job | "new" | null>(null);
+  const [openJobId, setOpenJobId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  function load() {
+    listJobs()
+      .then(setJobs)
+      .catch((err) => setError(errorMessage(err, "Couldn't load jobs.")));
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const visible =
+    jobs?.filter(
+      (job) =>
+        (tab === "active" ? !job.archived : job.archived) &&
+        matchesSearch(search, job.title, job.teamName, job.location, JOB_STATUS_LABELS[job.status], ...job.hiringTeam.map((m) => m.name)),
+    ) ?? null;
+
+  function handleExport() {
+    if (!visible || visible.length === 0) {
+      setNotice("No jobs to export.");
+      return;
+    }
+    downloadCsv(
+      `jobs-${new Date().toISOString().slice(0, 10)}.csv`,
+      ["Title", "Department", "Location", "Type", "Openings", "Status", "Applications", "Hiring team", "Created"],
+      visible.map((job) => [
+        job.title,
+        job.teamName ?? "",
+        job.location ?? "",
+        EMPLOYMENT_TYPE_LABELS[job.employmentType],
+        job.openings,
+        JOB_STATUS_LABELS[job.status],
+        job.applicationCount,
+        job.hiringTeam.map((m) => m.name).join("; "),
+        job.createdAt.slice(0, 10),
+      ]),
+    );
+  }
+
+  async function handleArchive(job: Job) {
+    if (!job.archived && !window.confirm(`Archive "${job.title}"? It moves to the Archived tab; candidates are kept.`)) return;
+    setBusyId(job.id);
+    try {
+      await setJobArchived(job.id, !job.archived);
+      setNotice(job.archived ? `"${job.title}" restored.` : `"${job.title}" archived.`);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't update the job."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const openJob = jobs?.find((j) => j.id === openJobId) ?? null;
+  if (openJob) {
+    return (
+      <>
+        {editingJob && (
+          <JobModal
+            job={editingJob === "new" ? null : editingJob}
+            onClose={() => setEditingJob(null)}
+            onSaved={(title) => {
+              setEditingJob(null);
+              setNotice(`"${title}" saved.`);
+              load();
+            }}
+          />
+        )}
+        <JobPipeline
+          job={openJob}
+          isHrAdmin={isHrAdmin}
+          currentUserId={currentUserId}
+          setNotice={setNotice}
+          onBack={() => {
+            setOpenJobId(null);
+            load();
+          }}
+          onEdit={() => setEditingJob(openJob)}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Toolbar
+        action={isHrAdmin ? "Add a job" : undefined}
+        onAction={isHrAdmin ? () => setEditingJob("new") : undefined}
+        onExport={handleExport}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search jobs"
+      />
+      {editingJob && (
+        <JobModal
+          job={editingJob === "new" ? null : editingJob}
+          onClose={() => setEditingJob(null)}
+          onSaved={(title) => {
+            setEditingJob(null);
+            setNotice(`"${title}" saved.`);
+            load();
+          }}
+        />
+      )}
+      <div className="module-tabs">
+        <button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Active</button>
+        <button className={tab === "archived" ? "active" : ""} onClick={() => setTab("archived")}>Archived</button>
+      </div>
+      {error ? (
+        <ErrorState message={error} />
+      ) : !visible ? (
+        <LoadingPanel />
+      ) : visible.length === 0 ? (
+        search.trim() ? (
+          <EmptyPanel icon="search" title="No matches" note={`No jobs match "${search.trim()}".`} />
+        ) : tab === "archived" ? (
+          <EmptyPanel icon="archive" title="No archived jobs" note="Jobs you archive will appear here." />
+        ) : (
+          <EmptyPanel
+            icon="userPlus"
+            title="No jobs yet"
+            note={isHrAdmin ? "Add a job to start tracking candidates." : "Jobs appear here once HR adds you to a hiring team."}
+          />
+        )
+      ) : (
+        <section className="panel">
+          <div className="table-head cols-6">
+            <b>Title</b><b>Applications</b><b>Department</b><b>Status</b><b>Hiring team</b><b className="actions-head">Actions</b>
+          </div>
+          {visible.map((job) => (
+            <div className="table-row cols-6" key={job.id}>
+              <span>
+                <button className="link-button" onClick={() => setOpenJobId(job.id)}>{job.title}</button>
+                <em className="asset-sub">
+                  {EMPLOYMENT_TYPE_LABELS[job.employmentType]}
+                  {job.location ? ` · ${job.location}` : ""}
+                  {job.openings > 1 ? ` · ${job.openings} openings` : ""}
+                </em>
+              </span>
+              <span>{job.applicationCount}</span>
+              <span>{job.teamName ?? "—"}</span>
+              <span><span className={`pill ${jobStatusPill[job.status]}`}>{JOB_STATUS_LABELS[job.status]}</span></span>
+              <span className="team-cell">{job.hiringTeam.length ? job.hiringTeam.map((m) => m.name).join(", ") : "—"}</span>
+              <span className="row-actions">
+                {isHrAdmin && (
+                  <>
+                    <button className="icon-action" disabled={busyId === job.id} onClick={() => setEditingJob(job)} aria-label={`Edit ${job.title}`} title="Edit">
+                      <Icon name="edit" size={15} />
+                    </button>
+                    <button
+                      className="icon-action"
+                      disabled={busyId === job.id}
+                      onClick={() => handleArchive(job)}
+                      aria-label={job.archived ? `Restore ${job.title}` : `Archive ${job.title}`}
+                      title={job.archived ? "Restore" : "Archive"}
+                    >
+                      <Icon name={job.archived ? "upload" : "archive"} size={15} />
+                    </button>
+                  </>
+                )}
+                <button className="icon-action" onClick={() => setOpenJobId(job.id)} aria-label={`Open ${job.title}`} title="Candidates">
+                  <Icon name="chevronRight" size={15} />
+                </button>
+              </span>
+            </div>
+          ))}
+        </section>
+      )}
+    </>
+  );
+}
+
+function JobModal({ job, onClose, onSaved }: { job: Job | null; onClose: () => void; onSaved: (title: string) => void }) {
+  const [title, setTitle] = useState(job?.title ?? "");
+  const [teamId, setTeamId] = useState(job?.teamId ?? "");
+  const [location, setLocation] = useState(job?.location ?? "");
+  const [employmentType, setEmploymentType] = useState<EmploymentType>(job?.employmentType ?? "full_time");
+  const [openings, setOpenings] = useState(String(job?.openings ?? 1));
+  const [status, setStatus] = useState<JobStatus>(job?.status ?? "open");
+  const [description, setDescription] = useState(job?.description ?? "");
+  const [hiringTeamIds, setHiringTeamIds] = useState<string[]>(job?.hiringTeam.map((m) => m.id) ?? []);
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [people, setPeople] = useState<AdminEmployee[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    listTeams().then(setTeams).catch(() => setTeams([]));
+    listEmployees()
+      .then((rows) => setPeople(rows.filter((r) => r.active && ["manager", "team_lead", "hr_admin"].includes(r.role))))
+      .catch(() => setPeople([]));
+  }, []);
+
+  function toggleMember(id: string) {
+    setHiringTeamIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const openingsNumber = Number(openings);
+    if (!Number.isInteger(openingsNumber) || openingsNumber < 1) {
+      setError("Openings must be a whole number of at least 1.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const input = { title, teamId: teamId || null, location, employmentType, openings: openingsNumber, status, description, hiringTeamIds };
+      if (job) await updateJob(job.id, input);
+      else await createJob(input);
+      onSaved(title.trim());
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save the job."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>{job ? "Edit job" : "Add a job"}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <h3 className="form-section">Job</h3>
+          <label>
+            Job title
+            <input required value={title} onChange={(e) => setTitle(e.target.value)} disabled={saving} placeholder="e.g. Warehouse operative" />
+          </label>
+          <label>
+            Department
+            <select value={teamId} onChange={(e) => setTeamId(e.target.value)} disabled={saving}>
+              <option value="">No department</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Location <span className="field-optional">optional</span>
+            <input value={location} onChange={(e) => setLocation(e.target.value)} disabled={saving} placeholder="e.g. Clondalkin, Dublin 22" />
+          </label>
+          <label>
+            Employment type
+            <select value={employmentType} onChange={(e) => setEmploymentType(e.target.value as EmploymentType)} disabled={saving}>
+              {(Object.keys(EMPLOYMENT_TYPE_LABELS) as EmploymentType[]).map((t) => (
+                <option key={t} value={t}>{EMPLOYMENT_TYPE_LABELS[t]}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Openings
+            <input type="number" min={1} step={1} required value={openings} onChange={(e) => setOpenings(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Status
+            <select value={status} onChange={(e) => setStatus(e.target.value as JobStatus)} disabled={saving}>
+              {(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => (
+                <option key={s} value={s}>{JOB_STATUS_LABELS[s]}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Description <span className="field-optional">optional</span>
+            <textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)} disabled={saving} placeholder="Responsibilities, requirements, shift pattern…" />
+          </label>
+          <h3 className="form-section">
+            Hiring team <span className="field-optional">they can see this job&apos;s candidates, add notes and move stages</span>
+          </h3>
+          <div className="choice-grid">
+            {people.length === 0 ? (
+              <p className="muted small">No managers, team leads or HR admins to choose from.</p>
+            ) : (
+              people.map((p) => (
+                <label key={p.id} className="choice-chip">
+                  <input type="checkbox" checked={hiringTeamIds.includes(p.id)} onChange={() => toggleMember(p.id)} disabled={saving} />
+                  <span>
+                    {p.fullName}
+                    <em>{p.role.replace("_", " ")}</em>
+                  </span>
+                </label>
+              ))
+            )}
+          </div>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : job ? "Save changes" : "Create job"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function JobPipeline({
+  job,
+  isHrAdmin,
+  currentUserId,
+  setNotice,
+  onBack,
+  onEdit,
+}: NoticeProps & { job: Job; isHrAdmin: boolean; currentUserId: string; onBack: () => void; onEdit: () => void }) {
+  const [candidates, setCandidates] = useState<Candidate[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [openCandidateId, setOpenCandidateId] = useState<string | null>(null);
+
+  function load() {
+    listCandidates(job.id)
+      .then(setCandidates)
+      .catch((err) => setError(errorMessage(err, "Couldn't load candidates.")));
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.id]);
+
+  function replaceCandidate(updated: Candidate) {
+    setCandidates((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev);
+  }
+
+  function handleExport() {
+    if (!candidates || candidates.length === 0) {
+      setNotice("No candidates to export.");
+      return;
+    }
+    downloadCsv(
+      `candidates-${job.title.replace(/\s+/g, "-").toLowerCase()}.csv`,
+      ["Name", "Email", "Phone", "Source", "Stage", "Interview", "Added"],
+      candidates.map((c) => [
+        c.fullName,
+        c.email ?? "",
+        c.phone ?? "",
+        c.source ?? "",
+        CANDIDATE_STAGE_LABELS[c.stage],
+        c.interviewAt ? formatDateTime(c.interviewAt) : "",
+        c.createdAt.slice(0, 10),
+      ]),
+    );
+  }
+
+  const filtered = candidates?.filter((c) => matchesSearch(search, c.fullName, c.email, c.phone, c.source)) ?? null;
+  const openCandidate = candidates?.find((c) => c.id === openCandidateId) ?? null;
+
+  return (
+    <>
+      <button className="outline-button back-button" onClick={onBack}>
+        <Icon name="arrowLeft" size={15} /> All jobs
+      </button>
+      <section className="panel job-summary">
+        <div>
+          <h2>{job.title}</h2>
+          <p className="muted small">
+            {[job.teamName, job.location, EMPLOYMENT_TYPE_LABELS[job.employmentType], job.openings > 1 ? `${job.openings} openings` : null]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+          {job.hiringTeam.length > 0 && <p className="muted small">Hiring team: {job.hiringTeam.map((m) => m.name).join(", ")}</p>}
+        </div>
+        <div className="job-summary-side">
+          <span className={`pill ${jobStatusPill[job.status]}`}>{JOB_STATUS_LABELS[job.status]}</span>
+          {isHrAdmin && (
+            <button className="outline-button" onClick={onEdit}><Icon name="edit" size={15} /> Edit job</button>
+          )}
+        </div>
+      </section>
+      <Toolbar
+        action={isHrAdmin ? "Add candidate" : undefined}
+        onAction={isHrAdmin ? () => setShowAdd(true) : undefined}
+        onExport={handleExport}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search candidates"
+      />
+      {showAdd && (
+        <AddCandidateModal
+          jobId={job.id}
+          onClose={() => setShowAdd(false)}
+          onCreated={(candidate, warning) => {
+            setShowAdd(false);
+            setNotice(warning ?? `${candidate.fullName} added.`);
+            load();
+          }}
+        />
+      )}
+      {openCandidate && (
+        <CandidateModal
+          candidate={openCandidate}
+          job={job}
+          isHrAdmin={isHrAdmin}
+          currentUserId={currentUserId}
+          setNotice={setNotice}
+          onClose={() => setOpenCandidateId(null)}
+          onChanged={replaceCandidate}
+          onDeleted={() => {
+            setOpenCandidateId(null);
+            load();
+          }}
+        />
+      )}
+      {error ? (
+        <ErrorState message={error} />
+      ) : !filtered ? (
+        <LoadingPanel />
+      ) : candidates?.length === 0 ? (
+        <EmptyPanel
+          icon="users"
+          title="No candidates yet"
+          note={isHrAdmin ? "Add candidates as applications come in." : "HR hasn't added any candidates to this job yet."}
+        />
+      ) : (
+        <div className="pipeline-board">
+          {CANDIDATE_STAGES.map((stage) => {
+            const inStage = filtered.filter((c) => c.stage === stage);
+            return (
+              <section key={stage} className={`pipeline-column stage-${stage}`}>
+                <header>
+                  <b>{CANDIDATE_STAGE_LABELS[stage]}</b>
+                  <span className="pill">{inStage.length}</span>
+                </header>
+                {inStage.length === 0 ? (
+                  <p className="pipeline-empty">—</p>
+                ) : (
+                  inStage.map((c) => (
+                    <button key={c.id} className="candidate-card" onClick={() => setOpenCandidateId(c.id)}>
+                      <b>{c.fullName}</b>
+                      {c.email && <span>{c.email}</span>}
+                      {c.interviewAt && stage === "interview" && (
+                        <span className="candidate-card-meta"><Icon name="calendar" size={12} /> {formatDateTime(c.interviewAt)}</span>
+                      )}
+                      {c.hiredEmployeeId && <span className="candidate-card-meta"><Icon name="check" size={12} /> Employee created</span>}
+                      {c.cvPath && <span className="candidate-card-meta"><Icon name="archive" size={12} /> CV</span>}
+                    </button>
+                  ))
+                )}
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function AddCandidateModal({
+  jobId,
+  onClose,
+  onCreated,
+}: {
+  jobId: string;
+  onClose: () => void;
+  onCreated: (candidate: Candidate, warning?: string) => void;
+}) {
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [source, setSource] = useState("");
+  const [cv, setCv] = useState<File | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setSaving(true);
+    try {
+      const candidate = await createCandidate(jobId, { fullName, email, phone, source });
+      if (cv) {
+        // The candidate exists at this point, so a failed upload is reported
+        // rather than thrown -- retrying the whole form would create a duplicate.
+        try {
+          await uploadCandidateCv(candidate, cv);
+        } catch (err) {
+          onCreated(candidate, `${candidate.fullName} added, but the CV didn't upload: ${errorMessage(err, "unknown error")}. Open the candidate to try again.`);
+          return;
+        }
+      }
+      onCreated(candidate);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't add the candidate."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>Add candidate</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Full name
+            <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Email <span className="field-optional">optional</span>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Phone <span className="field-optional">optional</span>
+            <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Source <span className="field-optional">optional</span>
+            <input value={source} onChange={(e) => setSource(e.target.value)} disabled={saving} placeholder="e.g. Indeed, referral, walk-in" />
+          </label>
+          <label>
+            CV <span className="field-optional">PDF or Word, up to 10 MB</span>
+            <input type="file" accept=".pdf,.doc,.docx" onChange={(e) => setCv(e.target.files?.[0] ?? null)} disabled={saving} />
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Adding…" : "Add candidate"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function CandidateModal({
+  candidate,
+  job,
+  isHrAdmin,
+  currentUserId,
+  setNotice,
+  onClose,
+  onChanged,
+  onDeleted,
+}: NoticeProps & {
+  candidate: Candidate;
+  job: Job;
+  isHrAdmin: boolean;
+  currentUserId: string;
+  onClose: () => void;
+  onChanged: (candidate: Candidate) => void;
+  onDeleted: () => void;
+}) {
+  const [stage, setStage] = useState<CandidateStage>(candidate.stage);
+  const [interviewAt, setInterviewAt] = useState(toLocalDateTimeInput(candidate.interviewAt));
+  const [fullName, setFullName] = useState(candidate.fullName);
+  const [email, setEmail] = useState(candidate.email ?? "");
+  const [phone, setPhone] = useState(candidate.phone ?? "");
+  const [source, setSource] = useState(candidate.source ?? "");
+  const [notes, setNotes] = useState<CandidateNote[] | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [busy, setBusy] = useState<"stage" | "details" | "note" | "cv" | "delete" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [hiring, setHiring] = useState(false);
+
+  function loadNotes() {
+    listCandidateNotes(candidate.id)
+      .then(setNotes)
+      .catch(() => setNotes([]));
+  }
+
+  useEffect(() => {
+    loadNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidate.id]);
+
+  // Hiring-team members can't move into or out of Hired (enforced server-side too).
+  const stageLocked = !isHrAdmin && candidate.stage === "hired";
+  const stageOptions = CANDIDATE_STAGES.filter((s) => isHrAdmin || s !== "hired" || candidate.stage === "hired");
+  const stageDirty = stage !== candidate.stage || interviewAt !== toLocalDateTimeInput(candidate.interviewAt);
+  const detailsDirty =
+    fullName !== candidate.fullName || email !== (candidate.email ?? "") || phone !== (candidate.phone ?? "") || source !== (candidate.source ?? "");
+
+  async function run<T>(kind: NonNullable<typeof busy>, fn: () => Promise<T>, fallback: string): Promise<T | undefined> {
+    setBusy(kind);
+    setError(null);
+    try {
+      return await fn();
+    } catch (err) {
+      setError(errorMessage(err, fallback));
+      return undefined;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveStage() {
+    const updated = await run("stage", () => setCandidateStage(candidate.id, stage, fromLocalDateTimeInput(interviewAt)), "Couldn't update the stage.");
+    if (updated) {
+      onChanged(updated);
+      setNotice(`${updated.fullName} moved to ${CANDIDATE_STAGE_LABELS[updated.stage]}.`);
+    }
+  }
+
+  async function saveDetails() {
+    const updated = await run("details", () => updateCandidate(candidate.id, { fullName, email, phone, source }), "Couldn't save the details.");
+    if (updated) {
+      onChanged(updated);
+      setNotice("Candidate details saved.");
+    }
+  }
+
+  async function handleCvUpload(file: File) {
+    const updated = await run("cv", () => uploadCandidateCv(candidate, file), "Couldn't upload the CV.");
+    if (updated) {
+      onChanged(updated);
+      setNotice("CV uploaded.");
+    }
+  }
+
+  async function openCv() {
+    if (!candidate.cvPath) return;
+    // Open the tab synchronously so popup blockers allow it, then point it at the signed URL.
+    const tab = window.open("about:blank", "_blank");
+    const url = await run("cv", () => getCandidateCvUrl(candidate.cvPath!), "Couldn't open the CV.");
+    if (url && tab) tab.location.href = url;
+    else tab?.close();
+  }
+
+  async function addNote() {
+    if (!noteDraft.trim()) return;
+    const ok = await run("note", () => addCandidateNote(candidate.id, noteDraft).then(() => true), "Couldn't add the note.");
+    if (ok) {
+      setNoteDraft("");
+      loadNotes();
+    }
+  }
+
+  async function removeNote(note: CandidateNote) {
+    if (!window.confirm("Delete this note?")) return;
+    const ok = await run("note", () => deleteCandidateNote(note.id).then(() => true), "Couldn't delete the note.");
+    if (ok) loadNotes();
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`Delete ${candidate.fullName}? Their CV and notes are deleted too. This can't be undone.`)) return;
+    const ok = await run("delete", () => deleteCandidate(candidate).then(() => true), "Couldn't delete the candidate.");
+    if (ok) {
+      setNotice(`${candidate.fullName} deleted.`);
+      onDeleted();
+    }
+  }
+
+  if (hiring) {
+    return (
+      <AddEmployeeModal
+        initial={{ fullName: candidate.fullName, email: candidate.email ?? "", teamId: job.teamId, phoneNumber: candidate.phone ?? "" }}
+        onClose={() => setHiring(false)}
+        onCreated={async (employee) => {
+          setHiring(false);
+          try {
+            await linkHiredEmployee(candidate.id, employee.id);
+            onChanged({ ...candidate, hiredEmployeeId: employee.id });
+            setNotice(`${employee.fullName} is now an employee. They'll receive an email to set their password.`);
+          } catch (err) {
+            setNotice(`${employee.fullName} was created as an employee, but linking them to the candidate failed: ${errorMessage(err, "unknown error")}`);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <div>
+            <h2>{candidate.fullName}</h2>
+            <p className="muted small">{job.title} · added {formatDate(candidate.createdAt.slice(0, 10))}</p>
+          </div>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+
+        <div className="candidate-layout">
+          <div>
+            <h3 className="form-section">Stage</h3>
+            <div className="admin-login-form candidate-stage-form">
+              <label>
+                Stage
+                <select value={stage} onChange={(e) => setStage(e.target.value as CandidateStage)} disabled={stageLocked || busy !== null}>
+                  {stageOptions.map((s) => (
+                    <option key={s} value={s}>{CANDIDATE_STAGE_LABELS[s]}</option>
+                  ))}
+                </select>
+                {stageLocked && <small className="field-hint">Only HR can change a hired candidate&apos;s stage.</small>}
+              </label>
+              <label>
+                Interview <span className="field-optional">optional</span>
+                <input type="datetime-local" value={interviewAt} onChange={(e) => setInterviewAt(e.target.value)} disabled={stageLocked || busy !== null} />
+              </label>
+            </div>
+            {stageDirty && (
+              <button className="primary-admin" onClick={saveStage} disabled={busy !== null}>
+                {busy === "stage" ? "Saving…" : "Save stage"}
+              </button>
+            )}
+
+            {candidate.stage === "hired" && isHrAdmin && (
+              <div className={`hire-callout${candidate.hiredEmployeeId ? " done" : ""}`}>
+                {candidate.hiredEmployeeId ? (
+                  <><Icon name="check" size={16} /> Employee record created.</>
+                ) : (
+                  <>
+                    <span>Hired — create their employee record so they can be invited.</span>
+                    <button className="primary-admin" onClick={() => setHiring(true)}>
+                      <Icon name="userPlus" size={15} /> Create employee
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            <h3 className="form-section">Details</h3>
+            <div className="admin-login-form candidate-details-form">
+              <label>
+                Full name
+                <input value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={!isHrAdmin || busy !== null} />
+              </label>
+              <label>
+                Email
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} disabled={!isHrAdmin || busy !== null} />
+              </label>
+              <label>
+                Phone
+                <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} disabled={!isHrAdmin || busy !== null} />
+              </label>
+              <label>
+                Source
+                <input value={source} onChange={(e) => setSource(e.target.value)} disabled={!isHrAdmin || busy !== null} />
+              </label>
+            </div>
+            {isHrAdmin && detailsDirty && (
+              <button className="primary-admin" onClick={saveDetails} disabled={busy !== null || !fullName.trim()}>
+                {busy === "details" ? "Saving…" : "Save details"}
+              </button>
+            )}
+
+            <h3 className="form-section">CV</h3>
+            <div className="cv-row">
+              {candidate.cvPath ? (
+                <button className="outline-button" onClick={openCv} disabled={busy !== null}>
+                  <Icon name="download" size={15} /> View CV
+                </button>
+              ) : (
+                <span className="muted small">No CV uploaded.</span>
+              )}
+              {isHrAdmin && (
+                <label className="outline-button file-button">
+                  <Icon name="upload" size={15} /> {candidate.cvPath ? "Replace" : "Upload"}
+                  <input
+                    type="file"
+                    accept=".pdf,.doc,.docx"
+                    disabled={busy !== null}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (file) handleCvUpload(file);
+                    }}
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="form-section">Notes</h3>
+            <div className="admin-login-form note-form">
+              <textarea rows={3} value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Interview feedback, call notes…" disabled={busy !== null} />
+            </div>
+            <button className="outline-button" onClick={addNote} disabled={busy !== null || !noteDraft.trim()}>
+              {busy === "note" ? "Saving…" : "Add note"}
+            </button>
+            <ul className="note-list">
+              {notes === null ? (
+                <li className="muted small">Loading…</li>
+              ) : notes.length === 0 ? (
+                <li className="muted small">No notes yet.</li>
+              ) : (
+                notes.map((note) => (
+                  <li key={note.id}>
+                    <div className="note-meta">
+                      <b>{note.authorName ?? "Unknown"}</b>
+                      <span>{formatDateTime(note.createdAt)}</span>
+                      {(isHrAdmin || note.authorId === currentUserId) && (
+                        <button className="purge-link" onClick={() => removeNote(note)} disabled={busy !== null}>Delete</button>
+                      )}
+                    </div>
+                    <p>{note.body}</p>
+                  </li>
+                ))
+              )}
+            </ul>
+          </div>
+        </div>
+
+        {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+        <div className="admin-modal-actions">
+          {isHrAdmin && (
+            <button className="outline-button danger-outline" onClick={handleDelete} disabled={busy !== null}>
+              <Icon name="trash" size={15} /> Delete candidate
+            </button>
+          )}
+          <span className="toolbar-spacer" />
+          <button className="outline-button" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
 

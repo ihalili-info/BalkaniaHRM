@@ -85,6 +85,7 @@ import {
   addPayslipLineItem,
   createPayrollPeriod,
   deletePayslipLineItem,
+  deletePayrollPeriod,
   finalizePayrollPeriod,
   generatePayslips,
   listEmployeeCompensation,
@@ -3145,11 +3146,28 @@ function PayrollPeriods({ setNotice }: NoticeProps) {
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<AdminPayrollPeriod | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   function load() {
     listPayrollPeriods()
       .then(setRows)
       .catch((err) => setError(errorMessage(err, "Couldn't load payroll periods.")));
+  }
+
+  async function handleDelete(period: AdminPayrollPeriod) {
+    const payslipNote =
+      period.payslipCount > 0 ? ` Its ${period.payslipCount} draft payslip${period.payslipCount === 1 ? "" : "s"} will be deleted too.` : "";
+    if (!window.confirm(`Delete the draft period "${period.label}"?${payslipNote} This can't be undone.`)) return;
+    setBusyId(period.id);
+    try {
+      await deletePayrollPeriod(period.id);
+      setNotice(`${period.label} was deleted.`);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't delete the period."));
+    } finally {
+      setBusyId(null);
+    }
   }
 
   useEffect(() => {
@@ -3199,6 +3217,19 @@ function PayrollPeriods({ setNotice }: NoticeProps) {
               <span className={`pill ${payrollStatusPill[period.status]}`}>{period.status}</span>
               <span>{period.payslipCount}</span>
               <span className="row-actions">
+                {/* Finalized and paid periods are the payroll record and can't be
+                    deleted (enforced in delete_payroll_period / RLS too). */}
+                {period.status === "draft" && (
+                  <button
+                    className="icon-action reject"
+                    disabled={busyId === period.id}
+                    onClick={() => handleDelete(period)}
+                    aria-label={`Delete ${period.label}`}
+                    title="Delete draft period"
+                  >
+                    <Icon name="trash" size={15} />
+                  </button>
+                )}
                 <button className="icon-action" onClick={() => setSelected(period)} aria-label={`Open ${period.label}`} title="Open">
                   <Icon name="chevronRight" size={15} />
                 </button>

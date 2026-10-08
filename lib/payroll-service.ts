@@ -213,6 +213,13 @@ export async function finalizePayrollPeriod(periodId: string): Promise<void> {
   if (error) throw error;
 }
 
+// Draft periods only -- the RPC refuses finalized/paid ones. Deletes the
+// period's payslips and line items with it.
+export async function deletePayrollPeriod(periodId: string): Promise<void> {
+  const { error } = await client().rpc("delete_payroll_period", { p_period_id: periodId });
+  if (error) throw error;
+}
+
 export async function markPayrollPeriodPaid(periodId: string): Promise<void> {
   const { error } = await client().rpc("mark_payroll_period_paid", { p_period_id: periodId });
   if (error) throw error;

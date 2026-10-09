@@ -85,6 +85,7 @@ import {
   setAssetRetired,
   setDeviceActive,
   setEmployeeActive,
+  setLeaveBalance,
   setLeaveEntitlement,
   setOpeningLeaveBalance,
   updateAttendanceLocation,
@@ -2406,7 +2407,18 @@ function SetEntitlementModal({
   const [entitlement, setEntitlement] = useState(existing ? formatLeaveDays(existing.entitlement) : "");
   // Blank = leave the current balance alone and only change the allowance.
   const [remaining, setRemaining] = useState(existing ? formatLeaveDays(existing.earned - existing.used) : "");
+  // Editing an existing row only. Changing "used" keeps "earned so far" fixed
+  // and recalculates "remaining" (earned - used); HR can still override it.
+  const [used, setUsed] = useState(existing ? formatLeaveDays(existing.used) : "");
   const canSetRemaining = leaveType !== "unpaid";
+
+  function handleUsedChange(next: string) {
+    setUsed(next);
+    const n = Number(next);
+    if (existing && canSetRemaining && next.trim() !== "" && Number.isFinite(n)) {
+      setRemaining(formatLeaveDays(Math.max(0, existing.earned - n)));
+    }
+  }
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -2432,22 +2444,37 @@ function SetEntitlementModal({
       setError("Remaining days must be zero or more.");
       return;
     }
+    const usedValue = existing ? Number(used) : 0;
+    if (existing && (used.trim() === "" || !Number.isFinite(usedValue) || usedValue < 0)) {
+      setError("Used days must be zero or more.");
+      return;
+    }
     setError(null);
     setSaving(true);
     try {
-      // Only re-pin the balance when HR actually changed "remaining", so
-      // saving just a new allowance doesn't overwrite it with a rounded value.
-      const remainingChanged =
-        canSetRemaining &&
-        remainingValue !== null &&
-        (!existing || remainingValue !== Number(formatLeaveDays(existing.earned - existing.used)));
-      if (remainingChanged) {
+      if (existing) {
+        // Send "remaining" only if it differs from what earned - used already
+        // gives; otherwise keep the current adjustment so nothing drifts by rounding.
+        const implied = Number(formatLeaveDays(Math.max(0, existing.earned - usedValue)));
+        await setLeaveBalance({
+          employeeId,
+          leaveType,
+          entitlement: value,
+          used: usedValue,
+          remaining: canSetRemaining && remainingValue !== null && remainingValue !== implied ? remainingValue : null,
+        });
+        onSaved(existing.employeeName);
+        return;
+      }
+      // New row (or an existing combination picked via "Set entitlement"):
+      // set the balance only if HR filled in "remaining", otherwise just the allowance.
+      if (canSetRemaining && remainingValue !== null) {
         await setOpeningLeaveBalance(employeeId, leaveType as "annual" | "medical" | "other", remainingValue as number, value);
       } else {
         await setLeaveEntitlement({ employeeId, leaveType, entitlement: value });
       }
       const employee = employees.find((e) => e.id === employeeId);
-      onSaved(existing?.employeeName ?? employee?.fullName ?? "employee");
+      onSaved(employee?.fullName ?? "employee");
     } catch (err) {
       setError(errorMessage(err, "Couldn't save the entitlement."));
     } finally {
@@ -2492,6 +2519,13 @@ function SetEntitlementModal({
             <input type="number" min="0" step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
             <small className="field-hint">Added 1/12 per month until the leave year resets on 1 April.</small>
           </label>
+          {existing && (
+            <label>
+              Used (days)
+              <input type="number" min="0" step="0.5" required value={used} onChange={(e) => handleUsedChange(e.target.value)} disabled={saving} />
+              <small className="field-hint">Days already taken this leave year. Remaining updates to match.</small>
+            </label>
+          )}
           {canSetRemaining && (
             <label>
               Remaining today (days) {!existing && <span className="field-optional">optional</span>}

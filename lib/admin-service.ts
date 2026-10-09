@@ -1015,3 +1015,23 @@ export async function updateEmployeeEmail(employeeId: string, email: string): Pr
   if (data?.error) throw new Error(data.error);
   return data.email;
 }
+
+// Full edit of a current-year balance from Leave management (see
+// 20261010_edit_leave_balance.sql). `remaining` null keeps the current
+// adjustment, so changing `used` moves remaining by the same amount.
+export async function setLeaveBalance(input: {
+  employeeId: string;
+  leaveType: string;
+  entitlement: number;
+  used: number;
+  remaining: number | null;
+}): Promise<void> {
+  const { error } = await client().rpc("set_leave_balance", {
+    p_employee_id: input.employeeId,
+    p_leave_type: input.leaveType,
+    p_entitlement: input.entitlement,
+    p_used: input.used,
+    p_remaining: input.remaining,
+  });
+  if (error) throw error;
+}

@@ -55,6 +55,7 @@ import {
   deleteWorkSchedule,
   getDashboardStats,
   getEmployeeDetails,
+  getEmployeeEmail,
   issueDisciplinaryAction,
   listAdminHolidays,
   listAssetHistory,
@@ -84,8 +85,10 @@ import {
   setDeviceActive,
   setEmployeeActive,
   setLeaveEntitlement,
+  setOpeningLeaveBalance,
   updateAttendanceLocation,
   updateEmployee,
+  updateEmployeeEmail,
   updateTeam,
   upsertEmployeeDetails,
   type AdminAsset,
@@ -1111,6 +1114,10 @@ function EditEmployeeModal({
   const [phoneNumber, setPhoneNumber] = useState("");
   const [address, setAddress] = useState("");
   const [placeOfBirth, setPlaceOfBirth] = useState("");
+  // Sign-in email from auth.users: null while loading, "" if it couldn't be read.
+  const [originalEmail, setOriginalEmail] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [emailLoadError, setEmailLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -1121,6 +1128,15 @@ function EditEmployeeModal({
     listAttendanceLocations()
       .then(setAttendanceLocations)
       .catch(() => setAttendanceLocations([]));
+    getEmployeeEmail(employee.id)
+      .then((current) => {
+        setOriginalEmail(current ?? "");
+        setEmail(current ?? "");
+      })
+      .catch((err) => {
+        setOriginalEmail("");
+        setEmailLoadError(errorMessage(err, "Couldn't load the current email."));
+      });
     getEmployeeDetails(employee.id)
       .then((details) => {
         setPpsNumber(details.ppsNumber ?? "");
@@ -1133,11 +1149,24 @@ function EditEmployeeModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee.id]);
 
+  const emailChanged = originalEmail !== null && !emailLoadError && email.trim().toLowerCase() !== originalEmail.toLowerCase();
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
+    if (
+      emailChanged &&
+      !window.confirm(`Change ${employee.fullName}'s sign-in email to ${email.trim()}? They'll sign in with the new address from now on; their password stays the same.`)
+    ) {
+      return;
+    }
     setSaving(true);
     try {
+      if (emailChanged) {
+        const saved = await updateEmployeeEmail(employee.id, email);
+        setOriginalEmail(saved);
+        setEmail(saved);
+      }
       const updated = await updateEmployee({
         id: employee.id,
         fullName,
@@ -1169,6 +1198,23 @@ function EditEmployeeModal({
           <label>
             Full name
             <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Work email
+            <input
+              type="email"
+              required={!emailLoadError}
+              autoComplete="off"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={saving || originalEmail === null || !!emailLoadError}
+              placeholder={originalEmail === null ? "Loading…" : undefined}
+            />
+            {emailLoadError ? (
+              <small className="field-hint">{emailLoadError}</small>
+            ) : (
+              emailChanged && <small className="field-hint">They&apos;ll sign in with this address once you save.</small>
+            )}
           </label>
           <label>
             Employee code
@@ -2220,6 +2266,7 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
+  const [editing, setEditing] = useState<AdminLeaveBalance | null>(null);
 
   function load() {
     listLeaveBalances()
@@ -2234,11 +2281,16 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
   return (
     <>
       <Toolbar action="Set entitlement" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search employee or leave type" />
-      {showModal && (
+      {(showModal || editing) && (
         <SetEntitlementModal
-          onClose={() => setShowModal(false)}
+          existing={editing}
+          onClose={() => {
+            setShowModal(false);
+            setEditing(null);
+          }}
           onSaved={(employeeName) => {
             setShowModal(false);
+            setEditing(null);
             setNotice(`Entitlement saved for ${employeeName}.`);
             load();
           }}
@@ -2255,20 +2307,25 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
           {/* "Remaining" is what the employee can still book today (earned so far,
               including any imported opening balance, minus used). "Yearly allowance"
               is what keeps accruing at 1/12 per month until the 1 April reset. */}
-          <div className="table-head cols-6">
-            <b>Employee</b><b>Leave type</b><b>Remaining</b><b>Earned so far</b><b>Used</b><b>Yearly allowance</b>
+          <div className="table-head cols-7">
+            <b>Employee</b><b>Leave type</b><b>Remaining</b><b>Earned so far</b><b>Used</b><b>Yearly allowance</b><b className="actions-head">Edit</b>
           </div>
           {rows
             .filter((row) => matchesSearch(search, row.employeeName, leaveTypeLabel(row.leaveType)))
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.leaveType.localeCompare(b.leaveType))
             .map((row) => (
-              <div className="table-row cols-6" key={row.id}>
+              <div className="table-row cols-7" key={row.id}>
                 <span>{row.employeeName}</span>
                 <span>{leaveTypeLabel(row.leaveType)}</span>
                 <span><b>{formatLeaveDays(row.earned - row.used)}</b></span>
                 <span>{formatLeaveDays(row.earned)}</span>
                 <span>{formatLeaveDays(row.used)}</span>
                 <span>{formatLeaveDays(row.entitlement)}</span>
+                <span className="row-actions">
+                  <button className="icon-action" onClick={() => setEditing(row)} aria-label={`Edit ${row.employeeName} ${leaveTypeLabel(row.leaveType)}`} title="Edit">
+                    <Icon name="edit" size={15} />
+                  </button>
+                </span>
               </div>
             ))}
         </section>
@@ -2277,11 +2334,24 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
   );
 }
 
-function SetEntitlementModal({ onClose, onSaved }: { onClose: () => void; onSaved: (employeeName: string) => void }) {
+function SetEntitlementModal({
+  existing,
+  onClose,
+  onSaved,
+}: {
+  // When editing a row from the table: person and leave type are fixed and the
+  // current figures are pre-filled.
+  existing?: AdminLeaveBalance | null;
+  onClose: () => void;
+  onSaved: (employeeName: string) => void;
+}) {
   const [employees, setEmployees] = useState<AdminEmployee[]>([]);
-  const [employeeId, setEmployeeId] = useState("");
-  const [leaveType, setLeaveType] = useState("annual");
-  const [entitlement, setEntitlement] = useState("");
+  const [employeeId, setEmployeeId] = useState(existing?.employeeId ?? "");
+  const [leaveType, setLeaveType] = useState(existing?.leaveType ?? "annual");
+  const [entitlement, setEntitlement] = useState(existing ? formatLeaveDays(existing.entitlement) : "");
+  // Blank = leave the current balance alone and only change the allowance.
+  const [remaining, setRemaining] = useState(existing ? formatLeaveDays(existing.earned - existing.used) : "");
+  const canSetRemaining = leaveType !== "unpaid";
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -2302,12 +2372,27 @@ function SetEntitlementModal({ onClose, onSaved }: { onClose: () => void; onSave
       setError("Enter a valid number of days.");
       return;
     }
+    const remainingValue = remaining.trim() === "" ? null : Number(remaining);
+    if (remainingValue !== null && (!Number.isFinite(remainingValue) || remainingValue < 0)) {
+      setError("Remaining days must be zero or more.");
+      return;
+    }
     setError(null);
     setSaving(true);
     try {
-      await setLeaveEntitlement({ employeeId, leaveType, entitlement: value });
+      // Only re-pin the balance when HR actually changed "remaining", so
+      // saving just a new allowance doesn't overwrite it with a rounded value.
+      const remainingChanged =
+        canSetRemaining &&
+        remainingValue !== null &&
+        (!existing || remainingValue !== Number(formatLeaveDays(existing.earned - existing.used)));
+      if (remainingChanged) {
+        await setOpeningLeaveBalance(employeeId, leaveType as "annual" | "medical" | "other", remainingValue as number, value);
+      } else {
+        await setLeaveEntitlement({ employeeId, leaveType, entitlement: value });
+      }
       const employee = employees.find((e) => e.id === employeeId);
-      onSaved(employee?.fullName ?? "employee");
+      onSaved(existing?.employeeName ?? employee?.fullName ?? "employee");
     } catch (err) {
       setError(errorMessage(err, "Couldn't save the entitlement."));
     } finally {
@@ -2319,11 +2404,15 @@ function SetEntitlementModal({ onClose, onSaved }: { onClose: () => void; onSave
     <div className="admin-modal-overlay" onClick={onClose}>
       <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
-          <h2>Set entitlement</h2>
+          <h2>{existing ? `${existing.employeeName} — ${leaveTypeLabel(existing.leaveType)}` : "Set entitlement"}</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
-        <p className="muted small">Works for employees and managers alike. Setting an existing employee/leave type combination updates it.</p>
+        {!existing && (
+          <p className="muted small">Works for employees and managers alike. Setting an existing employee/leave type combination updates it.</p>
+        )}
         <form className="admin-login-form" onSubmit={handleSubmit}>
+          {!existing && (
+          <>
           <label>
             Employee or manager
             <select required value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} disabled={saving}>
@@ -2341,10 +2430,22 @@ function SetEntitlementModal({ onClose, onSaved }: { onClose: () => void; onSave
               ))}
             </select>
           </label>
+          </>
+          )}
           <label>
-            Entitlement (days)
+            Yearly allowance (days)
             <input type="number" min="0" step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
+            <small className="field-hint">Added 1/12 per month until the leave year resets on 1 April.</small>
           </label>
+          {canSetRemaining && (
+            <label>
+              Remaining today (days) {!existing && <span className="field-optional">optional</span>}
+              <input type="number" min="0" step="0.01" value={remaining} onChange={(e) => setRemaining(e.target.value)} disabled={saving} />
+              <small className="field-hint">
+                What they can still book right now, e.g. carried over from your old records. Monthly accrual continues on top of it.
+              </small>
+            </label>
+          )}
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">
             <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>

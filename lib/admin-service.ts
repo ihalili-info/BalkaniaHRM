@@ -953,7 +953,7 @@ export async function listTimesheet(startDate: string, endDate: string): Promise
 // Sets this leave year's balance so that today's available days equal
 // `remaining` (see 20261009_leave_opening_balance.sql). `entitlement` is the
 // yearly allowance that keeps accruing monthly on top; null keeps the current one.
-export async function setOpeningLeaveBalance(employeeId: string, leaveType: "annual" | "medical", remaining: number, entitlement: number | null): Promise<void> {
+export async function setOpeningLeaveBalance(employeeId: string, leaveType: "annual" | "medical" | "other", remaining: number, entitlement: number | null): Promise<void> {
   const { error } = await client().rpc("set_opening_leave_balance", {
     p_employee_id: employeeId,
     p_leave_type: leaveType,
@@ -961,4 +961,20 @@ export async function setOpeningLeaveBalance(employeeId: string, leaveType: "ann
     p_entitlement: entitlement,
   });
   if (error) throw error;
+}
+
+// Sign-in email lives in auth.users, so reads and changes go through the
+// HR-only employee-email Edge Function.
+export async function getEmployeeEmail(employeeId: string): Promise<string | null> {
+  const { data, error } = await client().functions.invoke("employee-email", { body: { employeeId } });
+  if (error) return unwrapFunctionError(error);
+  if (data?.error) throw new Error(data.error);
+  return data?.email ?? null;
+}
+
+export async function updateEmployeeEmail(employeeId: string, email: string): Promise<string> {
+  const { data, error } = await client().functions.invoke("employee-email", { body: { employeeId, email } });
+  if (error) return unwrapFunctionError(error);
+  if (data?.error) throw new Error(data.error);
+  return data.email;
 }

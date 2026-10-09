@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import "./admin.css";
 import { Icon } from "../../components/icons";
+import { DateInput } from "../../components/date-input";
 import { getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supabaseConfigured } from "../../lib/auth-service";
 import { getLeaveBalances, getLeaveRequests, getMyProfile, submitLeaveRequest } from "../../lib/employee-service";
 import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../lib/domain";
@@ -1093,7 +1094,7 @@ function AddEmployeeModal({
           )}
           <label>
             Start date
-            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
+            <DateInput required value={startDate} onChange={setStartDate} disabled={saving} />
             <small className="field-hint">Leave accrues from this date — use their actual first day.</small>
           </label>
           <label>
@@ -1120,7 +1121,7 @@ function AddEmployeeModal({
           </label>
           <label>
             Date of birth
-            <input type="date" value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} disabled={saving} />
+            <DateInput value={dateOfBirth} onChange={setDateOfBirth} disabled={saving} />
           </label>
           <label>
             Phone number
@@ -1295,7 +1296,7 @@ function EditEmployeeModal({
           </label>
           <label>
             Start date
-            <input type="date" required value={startDate} onChange={(e) => setStartDate(e.target.value)} disabled={saving} />
+            <DateInput required value={startDate} onChange={setStartDate} disabled={saving} />
             <small className="field-hint">Leave accrues from this date.</small>
           </label>
           <label>
@@ -1322,7 +1323,7 @@ function EditEmployeeModal({
           </label>
           <label>
             Date of birth
-            <input type="date" value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} disabled={saving} />
+            <DateInput value={dateOfBirth} onChange={setDateOfBirth} disabled={saving} />
           </label>
           <label>
             Phone number
@@ -1888,11 +1889,11 @@ function Timesheets({ setNotice }: NoticeProps) {
       <div className="timesheet-range">
         <label>
           From
-          <input type="date" value={startDate} max={endDate} onChange={(e) => setStartDate(e.target.value)} />
+          <DateInput value={startDate} max={endDate} onChange={setStartDate} />
         </label>
         <label>
           To
-          <input type="date" value={endDate} min={startDate} onChange={(e) => setEndDate(e.target.value)} />
+          <DateInput value={endDate} min={startDate} onChange={setEndDate} />
         </label>
       </div>
       <div className="admin-stats">
@@ -2282,11 +2283,11 @@ function RequestLeaveModal({ onClose, onSaved }: { onClose: () => void; onSaved:
           </label>
           <label>
             Starts on
-            <input type="date" required value={startsOn} onChange={(e) => setStartsOn(e.target.value)} disabled={saving} />
+            <DateInput required value={startsOn} onChange={setStartsOn} disabled={saving} />
           </label>
           <label>
             Ends on
-            <input type="date" required value={endsOn} onChange={(e) => setEndsOn(e.target.value)} disabled={saving} />
+            <DateInput required value={endsOn} onChange={setEndsOn} disabled={saving} />
           </label>
           <label>
             Note (optional)
@@ -2665,7 +2666,7 @@ function IssueDisciplinaryModal({ onClose, onIssued }: { onClose: () => void; on
           </label>
           <label>
             Date
-            <input type="date" required value={occurredOn} onChange={(e) => setOccurredOn(e.target.value)} disabled={saving} />
+            <DateInput required value={occurredOn} onChange={setOccurredOn} disabled={saving} />
           </label>
           <label>
             Reason
@@ -2806,7 +2807,7 @@ function AddHolidayModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
         <form className="admin-login-form" onSubmit={handleSubmit}>
           <label>
             Date
-            <input type="date" required value={date} onChange={(e) => setDate(e.target.value)} disabled={saving} />
+            <DateInput required value={date} onChange={setDate} disabled={saving} />
           </label>
           <label>
             Name
@@ -3525,11 +3526,11 @@ function CreatePayrollPeriodModal({ onClose, onCreated }: { onClose: () => void;
           </label>
           <label>
             Starts on
-            <input required type="date" value={startsOn} max={endsOn || undefined} onChange={(e) => setStartsOn(e.target.value)} disabled={saving} />
+            <DateInput required value={startsOn} max={endsOn || undefined} onChange={setStartsOn} disabled={saving} />
           </label>
           <label>
             Ends on
-            <input required type="date" value={endsOn} min={startsOn || undefined} onChange={(e) => setEndsOn(e.target.value)} disabled={saving} />
+            <DateInput required value={endsOn} min={startsOn || undefined} onChange={setEndsOn} disabled={saving} />
           </label>
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">

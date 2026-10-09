@@ -353,3 +353,42 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 }
 .sick-balance { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
 .sick-balance b { color: var(--ink); }
+
+/* DateInput (components/date-input.tsx): a text field that accepts pasted dates
+   in any format, with a calendar button that opens the native picker. The
+   two-class selectors outrank the forms' generic "input { display:block ... }". */
+.date-input { position: relative; display: block; margin-top: 6px; }
+.timesheet-range .date-input { margin-top: 0; }
+.date-input .date-input-text { display: block; width: 100%; margin-top: 0; padding-right: 42px; }
+.date-input.is-invalid .date-input-text { border-color: var(--danger) !important; background: var(--danger-soft); }
+.date-input .date-input-button {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.date-input .date-input-button:hover:not(:disabled) { background: var(--surface-subtle); color: var(--ink); }
+/* Kept in the DOM (showPicker needs a rendered input) but invisible, anchored
+   under the button so the native popup opens next to the field. */
+.date-input .date-input-native {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { Icon } from "../components/icons";
+import { DateInput } from "../components/date-input";
 import { changePassword, getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supabaseConfigured } from "../lib/auth-service";
 import { errorMessage } from "../lib/errors";
 import { recordAttendance } from "../lib/attendance-service";
@@ -715,11 +716,11 @@ function LeaveForm({
         </label>
         <label>
           Start date
-          <input type="date" required value={startsOn} onChange={(e) => setStartsOn(e.target.value)} />
+          <DateInput required value={startsOn} onChange={setStartsOn} />
         </label>
         <label>
           End date
-          <input type="date" required value={endsOn} onChange={(e) => setEndsOn(e.target.value)} />
+          <DateInput required value={endsOn} onChange={setEndsOn} />
         </label>
         <label>
           Note

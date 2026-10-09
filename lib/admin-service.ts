@@ -949,3 +949,16 @@ export async function listTimesheet(startDate: string, endDate: string): Promise
     };
   });
 }
+
+// Sets this leave year's balance so that today's available days equal
+// `remaining` (see 20261009_leave_opening_balance.sql). `entitlement` is the
+// yearly allowance that keeps accruing monthly on top; null keeps the current one.
+export async function setOpeningLeaveBalance(employeeId: string, leaveType: "annual" | "medical", remaining: number, entitlement: number | null): Promise<void> {
+  const { error } = await client().rpc("set_opening_leave_balance", {
+    p_employee_id: employeeId,
+    p_leave_type: leaveType,
+    p_remaining: remaining,
+    p_entitlement: entitlement,
+  });
+  if (error) throw error;
+}

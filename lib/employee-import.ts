@@ -1,4 +1,4 @@
-import { createEmployee } from "./admin-service";
+import { createEmployee, setOpeningLeaveBalance } from "./admin-service";
 
 export interface ImportRow {
   rowNumber: number; // 1-based sheet row, header = 1
@@ -10,6 +10,10 @@ export interface ImportRow {
   dateOfBirth: string;
   phoneNumber: string;
   address: string;
+  // Remaining days as of today, from the spreadsheet; null when the column is
+  // missing or the cell is blank (no balance is set up then).
+  annualRemaining: number | null;
+  sickRemaining: number | null;
   errors: string[];
   warnings: string[];
 }
@@ -31,6 +35,8 @@ const HEADERS: Record<string, string[]> = {
   phone: ["phone number", "phone", "mobile"],
   address: ["address"],
   city: ["city", "town"],
+  annualLeave: ["annual leave", "annual leave remaining", "remaining annual leave", "annual leave days", "holidays remaining"],
+  sickLeave: ["sick leave", "sick leave remaining", "remaining sick leave", "sick days", "medical leave"],
 };
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -58,6 +64,17 @@ function toIsoDate(value: unknown): string | null {
   const dmy = text.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/);
   if (dmy) return validDate(+dmy[3], +dmy[2], +dmy[1]);
   return null;
+}
+
+// Accepts 17, "17", "17 days", "4.3 days", "6,5 days". Returns undefined for
+// blank, null for something that isn't a non-negative number.
+function toDays(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "number") return value >= 0 ? Math.round(value * 100) / 100 : null;
+  const text = String(value).trim().toLowerCase().replace(/s*days?$/, "").replace(",", ".");
+  if (!text) return undefined;
+  const n = Number(text);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 }
 
 function validDate(y: number, m: number, d: number): string | null {
@@ -119,6 +136,11 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
 
     const address = [text(raw, "address"), text(raw, "city")].filter(Boolean).join(", ");
 
+    const annualRemaining = toDays(cell(raw, "annualLeave"));
+    if (annualRemaining === null) errors.push(`Annual leave "${text(raw, "annualLeave")}" isn't a number of days`);
+    const sickRemaining = toDays(cell(raw, "sickLeave"));
+    if (sickRemaining === null) errors.push(`Sick leave "${text(raw, "sickLeave")}" isn't a number of days`);
+
     rows.push({
       rowNumber: index + 2,
       fullName,
@@ -129,6 +151,8 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
       dateOfBirth: dateOfBirth ?? "",
       phoneNumber: text(raw, "phone"),
       address,
+      annualRemaining: annualRemaining ?? null,
+      sickRemaining: sickRemaining ?? null,
       errors,
       warnings,
     });
@@ -140,18 +164,28 @@ export interface ImportOutcome {
   row: ImportRow;
   ok: boolean;
   message?: string;
+  // Employee was created but something after it (leave balances) failed.
+  warning?: string;
+}
+
+export interface LeaveImportOptions {
+  // Yearly allowance (days) that keeps accruing monthly on top of the imported
+  // remaining days. Applied to every imported row that has a balance.
+  annualEntitlement: number;
+  sickEntitlement: number;
 }
 
 // Runs one create-employee call per row, sequentially so Supabase's auth
 // invite email rate limits aren't tripped by a burst and failures stay attributable.
 export async function importEmployees(
   rows: ImportRow[],
+  leave: LeaveImportOptions,
   onProgress: (done: number, total: number) => void,
 ): Promise<ImportOutcome[]> {
   const outcomes: ImportOutcome[] = [];
   for (const row of rows) {
     try {
-      await createEmployee({
+      const employee = await createEmployee({
         fullName: row.fullName,
         email: row.email,
         role: "employee",
@@ -161,7 +195,22 @@ export async function importEmployees(
         phoneNumber: row.phoneNumber || undefined,
         address: row.address || undefined,
       });
-      outcomes.push({ row, ok: true });
+      // Balances are set after the employee exists; a failure here doesn't undo
+      // the (already emailed) invite, it's reported so HR can fix it under Leave.
+      const balanceErrors: string[] = [];
+      const balances: Array<["annual" | "medical", number | null, number, string]> = [
+        ["annual", row.annualRemaining, leave.annualEntitlement, "annual leave"],
+        ["medical", row.sickRemaining, leave.sickEntitlement, "sick leave"],
+      ];
+      for (const [type, remaining, entitlement, label] of balances) {
+        if (remaining === null) continue;
+        try {
+          await setOpeningLeaveBalance(employee.id, type, remaining, entitlement);
+        } catch (err) {
+          balanceErrors.push(`${label}: ${err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : "unknown error"}`);
+        }
+      }
+      outcomes.push({ row, ok: true, warning: balanceErrors.length ? `Invited, but couldn't set ${balanceErrors.join("; ")}` : undefined });
     } catch (err) {
       const message = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : "Unknown error";
       outcomes.push({ row, ok: false, message });

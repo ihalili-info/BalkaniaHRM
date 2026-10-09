@@ -359,3 +359,5 @@
 @media (max-width: 800px) {
   .candidate-layout { grid-template-columns: 1fr; }
 }
+.admin-modal.wide .import-leave-options { grid-template-columns: 1fr 1fr; margin: 4px 0 6px; }
+.admin-modal.wide .import-leave-options > p { grid-column: 1 / -1; }

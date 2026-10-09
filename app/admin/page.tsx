@@ -768,6 +768,11 @@ function ImportEmployeesModal({
   const [fileError, setFileError] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [outcomes, setOutcomes] = useState<ImportOutcome[] | null>(null);
+  // Yearly allowances that keep accruing on top of the imported remaining days.
+  // Defaults are the Irish statutory minimums for full-time staff (4 working
+  // weeks annual leave; 5 days statutory sick leave).
+  const [annualEntitlement, setAnnualEntitlement] = useState("20");
+  const [sickEntitlement, setSickEntitlement] = useState("5");
 
   async function handleFile(file: File) {
     setFileError(null);
@@ -797,9 +802,15 @@ function ImportEmployeesModal({
     if (!rows) return;
     const chosen = rows.filter((r) => selected.has(r.rowNumber) && r.errors.length === 0);
     if (chosen.length === 0) return;
+    const annual = Number(annualEntitlement);
+    const sick = Number(sickEntitlement);
+    if (hasLeaveColumns && (!Number.isFinite(annual) || annual < 0 || !Number.isFinite(sick) || sick < 0)) {
+      setFileError("Yearly allowances must be zero or more.");
+      return;
+    }
     if (!window.confirm(`Create ${chosen.length} employee${chosen.length === 1 ? "" : "s"} and email each of them an invite to set their password? Emails are sent immediately and can't be recalled.`)) return;
     setProgress({ done: 0, total: chosen.length });
-    const results = await importEmployees(chosen, (done, total) => setProgress({ done, total }));
+    const results = await importEmployees(chosen, { annualEntitlement: annual, sickEntitlement: sick }, (done, total) => setProgress({ done, total }));
     setOutcomes(results);
     setProgress(null);
     onDone();
@@ -808,6 +819,8 @@ function ImportEmployeesModal({
   const importing = progress !== null;
   const selectedCount = rows?.filter((r) => selected.has(r.rowNumber) && r.errors.length === 0).length ?? 0;
   const failed = outcomes?.filter((o) => !o.ok) ?? [];
+  const warned = outcomes?.filter((o) => o.ok && o.warning) ?? [];
+  const hasLeaveColumns = rows?.some((r) => r.annualRemaining !== null || r.sickRemaining !== null) ?? false;
 
   return (
     <div className="admin-modal-overlay" onClick={importing ? undefined : onClose}>
@@ -829,6 +842,16 @@ function ImportEmployeesModal({
                 ))}
               </ul>
             )}
+            {warned.length > 0 && (
+              <>
+                <p className="muted small">Invited, but leave balances need fixing under Leave management:</p>
+                <ul className="import-list">
+                  {warned.map((o) => (
+                    <li key={o.row.rowNumber}>Row {o.row.rowNumber} — {o.row.fullName}: {o.warning}</li>
+                  ))}
+                </ul>
+              </>
+            )}
             <div className="admin-modal-actions">
               <button className="primary-admin" onClick={onClose}>Done</button>
             </div>
@@ -836,8 +859,8 @@ function ImportEmployeesModal({
         ) : (
           <>
             <p className="muted small">
-              Upload an .xlsx file with a heading row. Used columns: Name &amp; Surname (or Name + Surname), Email, Team, Start Date, Date of Birth, Phone Number, Address, City.
-              Everyone is added as an Employee; other columns (gender, age, leave balances) are ignored.
+              Upload an .xlsx file with a heading row. Used columns: Name &amp; Surname (or Name + Surname), Email, Team, Start Date, Date of Birth, Phone Number, Address, City,
+              Annual Leave and Sick Leave (days remaining today). Everyone is added as an Employee; other columns (gender, age) are ignored.
             </p>
             <input
               type="file"
@@ -852,6 +875,22 @@ function ImportEmployeesModal({
                 <p className="muted small">
                   {rows.length} rows read · {rows.filter((r) => r.errors.length > 0).length} with errors (can&apos;t be imported) · {selectedCount} selected
                 </p>
+                {hasLeaveColumns && (
+                  <div className="admin-login-form import-leave-options">
+                    <label>
+                      Annual leave allowance <span className="field-optional">days per year</span>
+                      <input type="number" min={0} step={0.5} value={annualEntitlement} onChange={(e) => setAnnualEntitlement(e.target.value)} disabled={importing} />
+                    </label>
+                    <label>
+                      Sick leave allowance <span className="field-optional">days per year</span>
+                      <input type="number" min={0} step={0.5} value={sickEntitlement} onChange={(e) => setSickEntitlement(e.target.value)} disabled={importing} />
+                    </label>
+                    <p className="muted small">
+                      Each person&apos;s balance today is set to the days in the file. From next month the allowance above keeps adding 1/12 per month,
+                      until the leave year resets on 1 April. Blank cells mean no balance is set for that leave type.
+                    </p>
+                  </div>
+                )}
                 <div className="import-table">
                   {rows.map((r) => (
                     <label key={r.rowNumber} className={`import-row${r.errors.length ? " has-error" : ""}`}>
@@ -863,6 +902,8 @@ function ImportEmployeesModal({
                       />
                       <span>
                         <b>{r.fullName || "(no name)"}</b> · {r.email || "(no email)"} · {r.teamName || "no team"}
+                        {r.annualRemaining !== null && <> · {r.annualRemaining} annual</>}
+                        {r.sickRemaining !== null && <> · {r.sickRemaining} sick</>}
                         {r.errors.map((m) => <em key={m} className="import-error"> {m}.</em>)}
                         {r.warnings.map((m) => <em key={m} className="import-warning"> {m}.</em>)}
                       </span>

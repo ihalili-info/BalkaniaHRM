@@ -351,3 +351,5 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
   .shell { border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 20px 60px rgba(22, 26, 46, 0.12); }
   .shell.centered { border-radius: var(--radius-lg); }
 }
+.sick-balance { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
+.sick-balance b { color: var(--ink); }

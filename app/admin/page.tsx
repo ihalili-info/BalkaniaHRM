@@ -2205,13 +2205,19 @@ function RequestLeaveModal({ onClose, onSaved }: { onClose: () => void; onSaved:
 
 const leaveTypeOptions: Array<[string, string]> = [
   ["annual", "Annual"],
-  ["medical", "Medical"],
+  ["medical", "Sick / medical"],
   ["unpaid", "Unpaid"],
   ["other", "Other"],
 ];
 
+const leaveTypeLabel = (type: string) => leaveTypeOptions.find(([value]) => value === type)?.[1] ?? type;
+
+// Days to at most 2 decimals, without trailing zeros: 17, 4.3, 11.67.
+const formatLeaveDays = (days: number) => String(Math.round(days * 100) / 100);
+
 function LeaveEntitlements({ setNotice }: NoticeProps) {
   const [rows, setRows] = useState<AdminLeaveBalance[] | null>(null);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
 
@@ -2227,7 +2233,7 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Set entitlement" onAction={() => setShowModal(true)} />
+      <Toolbar action="Set entitlement" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search employee or leave type" />
       {showModal && (
         <SetEntitlementModal
           onClose={() => setShowModal(false)}
@@ -2246,16 +2252,25 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
         <EmptyPanel icon="calendar" title="No entitlements set" note="Set entitlements for employees and managers so their leave balances show up correctly." />
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Employee</b><b>Leave type</b><b>Entitlement</b><b>Earned</b><b>Used</b></div>
-          {rows.map((row) => (
-            <div className="table-row cols-5" key={row.id}>
-              <span>{row.employeeName}</span>
-              <span className="capitalize">{row.leaveType}</span>
-              <span>{row.entitlement}</span>
-              <span>{row.earned}</span>
-              <span>{row.used}</span>
-            </div>
-          ))}
+          {/* "Remaining" is what the employee can still book today (earned so far,
+              including any imported opening balance, minus used). "Yearly allowance"
+              is what keeps accruing at 1/12 per month until the 1 April reset. */}
+          <div className="table-head cols-6">
+            <b>Employee</b><b>Leave type</b><b>Remaining</b><b>Earned so far</b><b>Used</b><b>Yearly allowance</b>
+          </div>
+          {rows
+            .filter((row) => matchesSearch(search, row.employeeName, leaveTypeLabel(row.leaveType)))
+            .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.leaveType.localeCompare(b.leaveType))
+            .map((row) => (
+              <div className="table-row cols-6" key={row.id}>
+                <span>{row.employeeName}</span>
+                <span>{leaveTypeLabel(row.leaveType)}</span>
+                <span><b>{formatLeaveDays(row.earned - row.used)}</b></span>
+                <span>{formatLeaveDays(row.earned)}</span>
+                <span>{formatLeaveDays(row.used)}</span>
+                <span>{formatLeaveDays(row.entitlement)}</span>
+              </div>
+            ))}
         </section>
       )}
     </>

@@ -587,6 +587,7 @@ function LeavesScreen({
   const isManager = isAdminPortalRole(profile.role);
   const annual = balances.find((b) => b.leaveType === "annual");
   const available = annual ? annual.earned - annual.used : 0;
+  const sick = balances.find((b) => b.leaveType === "medical");
 
   return (
     <>
@@ -605,19 +606,26 @@ function LeavesScreen({
             </strong>
             {annual ? (
               <>
+                {/* "earned" can include a balance carried in when HR imported staff, so
+                    it isn't framed as a fraction of the yearly allowance. */}
                 <p>
-                  You&apos;ve earned <b>{formatDays(annual.earned)}</b> of your <b>{formatDays(annual.entitlement)} days</b>. After{" "}
-                  <b>{formatDays(annual.used)} used</b>, {formatDays(available)} are available to book.
+                  Your allowance is <b>{formatDays(annual.entitlement)} days</b> a year, added monthly. You&apos;ve built up{" "}
+                  <b>{formatDays(annual.earned)}</b> this leave year and used <b>{formatDays(annual.used)}</b>.
                 </p>
                 <div className="progress">
                   <span style={{ width: `${annual.entitlement ? Math.min(100, (annual.earned / annual.entitlement) * 100) : 0}%` }} />
                 </div>
                 <div className="legend">
-                  Entitled {formatDays(annual.entitlement)} <b>·</b> Earned {formatDays(annual.earned)} <b>·</b> Used {formatDays(annual.used)}
+                  Allowance {formatDays(annual.entitlement)}/year <b>·</b> Built up {formatDays(annual.earned)} <b>·</b> Used {formatDays(annual.used)}
                 </div>
               </>
             ) : (
               <p className="muted">No leave entitlement configured yet. Ask HR to set your leave balance.</p>
+            )}
+            {sick && (
+              <p className="sick-balance">
+                Sick days available: <b>{formatDays(sick.earned - sick.used)}</b>
+              </p>
             )}
           </section>
 

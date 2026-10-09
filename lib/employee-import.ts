@@ -1,7 +1,18 @@
-import { createEmployee, setOpeningLeaveBalance } from "./admin-service";
+import { createEmployee, setOpeningLeaveBalance, updateEmployeeDetailsFields, updateEmployeeProfileFields } from "./admin-service";
+
+// "create" invites new people; "update" fills in data for people already in
+// the directory (matched by full name), without sending any email.
+export type ImportMode = "create" | "update";
+
+export interface ExistingEmployee {
+  id: string;
+  fullName: string;
+}
 
 export interface ImportRow {
   rowNumber: number; // 1-based sheet row, header = 1
+  // Update mode: the existing employee this row was matched to.
+  employeeId: string | null;
   fullName: string;
   email: string;
   teamName: string;
@@ -71,7 +82,7 @@ function toIsoDate(value: unknown): string | null {
 function toDays(value: unknown): number | null | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value === "number") return value >= 0 ? Math.round(value * 100) / 100 : null;
-  const text = String(value).trim().toLowerCase().replace(/s*days?$/, "").replace(",", ".");
+  const text = String(value).trim().toLowerCase().replace(/\s*days?$/, "").replace(",", ".");
   if (!text) return undefined;
   const n = Number(text);
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
@@ -88,19 +99,28 @@ export async function readEmployeeSheet(file: File): Promise<unknown[][]> {
   return (await readSheet(file)) as unknown[][];
 }
 
-export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], existingNames: string[]): ImportRow[] {
+export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], existingEmployees: ExistingEmployee[], mode: ImportMode = "create"): ImportRow[] {
   if (sheet.length < 2) return [];
   const header = sheet[0].map(normalise);
   const col: Record<string, number> = {};
   for (const [key, names] of Object.entries(HEADERS)) col[key] = header.findIndex((h) => names.includes(h));
-  if (col.email < 0 || (col.fullName < 0 && col.firstName < 0)) {
-    throw new Error('Couldn\'t find the required columns. The first row needs headings like "Name & Surname" (or "Name" and "Surname") and "Email".');
+  if (col.fullName < 0 && col.firstName < 0) {
+    throw new Error('Couldn\'t find a name column. The first row needs a heading like "Name & Surname" (or "Name" and "Surname").');
+  }
+  if (mode === "create" && col.email < 0) {
+    throw new Error('Couldn\'t find an "Email" column, which is needed to invite new employees.');
   }
 
   const cell = (row: unknown[], key: string) => (col[key] >= 0 ? row[col[key]] : undefined);
   const text = (row: unknown[], key: string) => String(cell(row, key) ?? "").trim();
   const teamsByName = new Map(teams.map((t) => [normalise(t.name), t]));
-  const existing = new Set(existingNames.map(normalise));
+  const existing = new Set(existingEmployees.map((e) => normalise(e.fullName)));
+  const idsByName = new Map<string, string[]>();
+  for (const e of existingEmployees) {
+    const key = normalise(e.fullName);
+    idsByName.set(key, [...(idsByName.get(key) ?? []), e.id]);
+  }
+  const seenMatches = new Set<string>();
   const seenEmails = new Set<string>();
   const currentYear = new Date().getFullYear();
 
@@ -115,10 +135,22 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
     const teamName = text(raw, "team");
 
     if (!fullName) errors.push("Missing name");
-    if (!email) errors.push("Missing email");
-    else if (!EMAIL_PATTERN.test(email)) errors.push("Invalid email");
-    else if (seenEmails.has(email)) errors.push("Email appears earlier in the file");
-    if (email) seenEmails.add(email);
+    let employeeId: string | null = null;
+    if (mode === "create") {
+      if (!email) errors.push("Missing email");
+      else if (!EMAIL_PATTERN.test(email)) errors.push("Invalid email");
+      else if (seenEmails.has(email)) errors.push("Email appears earlier in the file");
+      if (email) seenEmails.add(email);
+    } else if (fullName) {
+      const matches = idsByName.get(normalise(fullName)) ?? [];
+      if (matches.length === 0) errors.push("No employee with this name in the directory");
+      else if (matches.length > 1) errors.push("Several employees have this name — update them by hand");
+      else if (seenMatches.has(matches[0])) errors.push("This person appears earlier in the file");
+      else {
+        employeeId = matches[0];
+        seenMatches.add(employeeId);
+      }
+    }
 
     const startDate = toIsoDate(cell(raw, "startDate"));
     if (startDate === null) errors.push("Start date isn't a valid date");
@@ -129,10 +161,10 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
     if (dateOfBirth === null) warnings.push("Date of birth isn't a valid date and was skipped");
 
     const team = teamName ? teamsByName.get(normalise(teamName)) : undefined;
-    if (!teamName) warnings.push("No team");
-    else if (!team) warnings.push(`Team "${teamName}" doesn't exist`);
+    if (!teamName) warnings.push(mode === "create" ? "No team" : "No team in file — team left unchanged");
+    else if (!team) warnings.push(`Team "${teamName}" doesn't exist${mode === "update" ? " — team left unchanged" : ""}`);
 
-    if (fullName && existing.has(normalise(fullName))) warnings.push("Someone with this name is already in the directory");
+    if (mode === "create" && fullName && existing.has(normalise(fullName))) warnings.push("Someone with this name is already in the directory");
 
     const address = [text(raw, "address"), text(raw, "city")].filter(Boolean).join(", ");
 
@@ -143,6 +175,7 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
 
     rows.push({
       rowNumber: index + 2,
+      employeeId,
       fullName,
       email,
       teamName,
@@ -215,6 +248,77 @@ export async function importEmployees(
       const message = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : "Unknown error";
       outcomes.push({ row, ok: false, message });
     }
+    onProgress(outcomes.length, rows.length);
+  }
+  return outcomes;
+}
+
+// What "update" mode will write for a row, for the preview and the confirm text.
+// Blank cells are skipped, so they never clear existing data.
+export function updateSummary(row: ImportRow): string[] {
+  const parts: string[] = [];
+  if (row.startDate) parts.push(`start ${row.startDate}`);
+  if (row.teamId) parts.push(`team ${row.teamName}`);
+  if (row.dateOfBirth) parts.push("date of birth");
+  if (row.phoneNumber) parts.push("phone");
+  if (row.address) parts.push("address");
+  if (row.annualRemaining !== null) parts.push(`${row.annualRemaining} annual`);
+  if (row.sickRemaining !== null) parts.push(`${row.sickRemaining} sick`);
+  return parts;
+}
+
+// Updates people already in the directory from the file. No invites are sent.
+// Order matters: the start date is saved before leave balances, because
+// accrual (and so the opening-balance adjustment) is calculated from it.
+export async function updateEmployeesFromFile(
+  rows: ImportRow[],
+  leave: LeaveImportOptions,
+  onProgress: (done: number, total: number) => void,
+): Promise<ImportOutcome[]> {
+  const describe = (err: unknown) =>
+    err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : "unknown error";
+  const outcomes: ImportOutcome[] = [];
+  for (const row of rows) {
+    if (!row.employeeId) {
+      outcomes.push({ row, ok: false, message: "Not matched to an employee" });
+      onProgress(outcomes.length, rows.length);
+      continue;
+    }
+    const problems: string[] = [];
+    try {
+      await updateEmployeeProfileFields(row.employeeId, {
+        ...(row.startDate ? { start_date: row.startDate } : {}),
+        ...(row.teamId ? { team_id: row.teamId } : {}),
+      });
+    } catch (err) {
+      problems.push(`start date/team: ${describe(err)}`);
+    }
+    try {
+      await updateEmployeeDetailsFields(row.employeeId, {
+        ...(row.dateOfBirth ? { date_of_birth: row.dateOfBirth } : {}),
+        ...(row.phoneNumber ? { phone_number: row.phoneNumber } : {}),
+        ...(row.address ? { address: row.address } : {}),
+      });
+    } catch (err) {
+      problems.push(`personal details: ${describe(err)}`);
+    }
+    const balances: Array<["annual" | "medical", number | null, number, string]> = [
+      ["annual", row.annualRemaining, leave.annualEntitlement, "annual leave"],
+      ["medical", row.sickRemaining, leave.sickEntitlement, "sick leave"],
+    ];
+    for (const [type, remaining, entitlement, label] of balances) {
+      if (remaining === null) continue;
+      try {
+        await setOpeningLeaveBalance(row.employeeId, type, remaining, entitlement);
+      } catch (err) {
+        problems.push(`${label}: ${describe(err)}`);
+      }
+    }
+    outcomes.push(
+      problems.length === 0
+        ? { row, ok: true }
+        : { row, ok: true, warning: `Partly updated — couldn't set ${problems.join("; ")}` },
+    );
     onProgress(outcomes.length, rows.length);
   }
   return outcomes;

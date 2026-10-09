@@ -1035,3 +1035,22 @@ export async function setLeaveBalance(input: {
   });
   if (error) throw error;
 }
+
+// Partial updates used by "Update existing employees" in the import dialog:
+// only the keys passed are written, so blank spreadsheet cells never wipe data.
+export async function updateEmployeeProfileFields(employeeId: string, patch: { start_date?: string; team_id?: string }): Promise<void> {
+  if (Object.keys(patch).length === 0) return;
+  const { error } = await client().from("profiles").update(patch).eq("id", employeeId);
+  if (error) throw error;
+}
+
+export async function updateEmployeeDetailsFields(
+  employeeId: string,
+  patch: { date_of_birth?: string; phone_number?: string; address?: string },
+): Promise<void> {
+  if (Object.keys(patch).length === 0) return;
+  // PostgREST upsert only writes the columns in the payload, so PPS number and
+  // place of birth are left as they are.
+  const { error } = await client().from("employee_details").upsert({ employee_id: employeeId, ...patch }, { onConflict: "employee_id" });
+  if (error) throw error;
+}

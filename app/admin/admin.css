@@ -378,3 +378,5 @@
 .attendance-missing summary { cursor: pointer; font-weight: 600; color: var(--danger); }
 .attendance-missing p { margin-top: 6px; }
 @media (max-width: 800px) { .attendance-list li { grid-template-columns: 1fr auto; } .attendance-list li > :last-child { grid-column: 1 / -1; } }
+.import-mode-tabs { margin: 8px 0 12px; }
+.admin-modal .admin-notice { margin: 0 0 12px; }

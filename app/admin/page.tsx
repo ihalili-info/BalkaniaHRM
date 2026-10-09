@@ -37,7 +37,17 @@ import {
   type Job,
   type JobStatus,
 } from "../../lib/recruitment-service";
-import { importEmployees, parseEmployeeRows, readEmployeeSheet, type ImportOutcome, type ImportRow } from "../../lib/employee-import";
+import {
+  importEmployees,
+  parseEmployeeRows,
+  readEmployeeSheet,
+  updateEmployeesFromFile,
+  updateSummary,
+  type ImportMode,
+  type ImportOutcome,
+  type ImportRow,
+  type ImportTeam,
+} from "../../lib/employee-import";
 import type { AttendanceEventType, Profile } from "../../lib/domain";
 import {
   addHoliday,
@@ -712,7 +722,7 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
       />
       {showImportModal && (
         <ImportEmployeesModal
-          existingNames={rows?.map((r) => r.fullName) ?? []}
+          existingEmployees={rows?.map((r) => ({ id: r.id, fullName: r.fullName })) ?? []}
           onClose={() => setShowImportModal(false)}
           onDone={() => load()}
         />
@@ -814,14 +824,17 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
 }
 
 function ImportEmployeesModal({
-  existingNames,
+  existingEmployees,
   onClose,
   onDone,
 }: {
-  existingNames: string[];
+  existingEmployees: Array<{ id: string; fullName: string }>;
   onClose: () => void;
   onDone: () => void;
 }) {
+  const [mode, setMode] = useState<ImportMode>("create");
+  // Kept so switching mode re-reads the same file without picking it again.
+  const [source, setSource] = useState<{ sheet: unknown[][]; teams: ImportTeam[] } | null>(null);
   const [rows, setRows] = useState<ImportRow[] | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [fileError, setFileError] = useState<string | null>(null);
@@ -833,19 +846,43 @@ function ImportEmployeesModal({
   const [annualEntitlement, setAnnualEntitlement] = useState("20");
   const [sickEntitlement, setSickEntitlement] = useState("5");
 
+  function applyParse(next: { sheet: unknown[][]; teams: ImportTeam[] }, nextMode: ImportMode) {
+    setFileError(null);
+    try {
+      const parsed = parseEmployeeRows(next.sheet, next.teams, existingEmployees, nextMode);
+      if (parsed.length === 0) throw new Error("No employee rows found in the file.");
+      setRows(parsed);
+      // In create mode, rows that may duplicate an existing person start unticked
+      // so including them is a conscious choice.
+      setSelected(
+        new Set(
+          parsed
+            .filter((r) => r.errors.length === 0 && (nextMode === "update" || !r.warnings.some((w) => w.includes("already in the directory"))))
+            .map((r) => r.rowNumber),
+        ),
+      );
+    } catch (err) {
+      setRows(null);
+      setFileError(errorMessage(err, "Couldn't read that file. Use an .xlsx file."));
+    }
+  }
+
   async function handleFile(file: File) {
     setFileError(null);
     setRows(null);
     try {
       const [sheet, teams] = await Promise.all([readEmployeeSheet(file), listTeams()]);
-      const parsed = parseEmployeeRows(sheet, teams, existingNames);
-      if (parsed.length === 0) throw new Error("No employee rows found in the file.");
-      setRows(parsed);
-      // Rows that may duplicate an existing person start unticked so including them is a conscious choice.
-      setSelected(new Set(parsed.filter((r) => r.errors.length === 0 && !r.warnings.some((w) => w.includes("already in the directory"))).map((r) => r.rowNumber)));
+      const next = { sheet, teams };
+      setSource(next);
+      applyParse(next, mode);
     } catch (err) {
       setFileError(errorMessage(err, "Couldn't read that file. Use an .xlsx file."));
     }
+  }
+
+  function switchMode(next: ImportMode) {
+    setMode(next);
+    if (source) applyParse(source, next);
   }
 
   function toggle(rowNumber: number) {
@@ -867,9 +904,15 @@ function ImportEmployeesModal({
       setFileError("Yearly allowances must be zero or more.");
       return;
     }
-    if (!window.confirm(`Create ${chosen.length} employee${chosen.length === 1 ? "" : "s"} and email each of them an invite to set their password? Emails are sent immediately and can't be recalled.`)) return;
+    const confirmText =
+      mode === "create"
+        ? `Create ${chosen.length} employee${chosen.length === 1 ? "" : "s"} and email each of them an invite to set their password? Emails are sent immediately and can't be recalled.`
+        : `Update ${chosen.length} existing employee${chosen.length === 1 ? "" : "s"} from the file? Filled-in cells overwrite what's saved now (start date, team, personal details, leave balances); blank cells are left alone. No emails are sent.`;
+    if (!window.confirm(confirmText)) return;
     setProgress({ done: 0, total: chosen.length });
-    const results = await importEmployees(chosen, { annualEntitlement: annual, sickEntitlement: sick }, (done, total) => setProgress({ done, total }));
+    const leave = { annualEntitlement: annual, sickEntitlement: sick };
+    const onProgress = (done: number, total: number) => setProgress({ done, total });
+    const results = mode === "create" ? await importEmployees(chosen, leave, onProgress) : await updateEmployeesFromFile(chosen, leave, onProgress);
     setOutcomes(results);
     setProgress(null);
     onDone();
@@ -892,7 +935,8 @@ function ImportEmployeesModal({
         {outcomes ? (
           <>
             <p>
-              <b>{outcomes.length - failed.length}</b> invited{failed.length > 0 && <>, <b>{failed.length}</b> failed</>}.
+              <b>{outcomes.length - failed.length}</b> {mode === "create" ? "invited" : "updated"}
+              {failed.length > 0 && <>, <b>{failed.length}</b> failed</>}.
             </p>
             {failed.length > 0 && (
               <ul className="import-list">
@@ -903,7 +947,9 @@ function ImportEmployeesModal({
             )}
             {warned.length > 0 && (
               <>
-                <p className="muted small">Invited, but leave balances need fixing under Leave management:</p>
+                <p className="muted small">
+                  {mode === "create" ? "Invited" : "Updated"}, but some data needs fixing by hand (Staff Directory or Leave management):
+                </p>
                 <ul className="import-list">
                   {warned.map((o) => (
                     <li key={o.row.rowNumber}>Row {o.row.rowNumber} — {o.row.fullName}: {o.warning}</li>
@@ -917,6 +963,21 @@ function ImportEmployeesModal({
           </>
         ) : (
           <>
+            <div className="module-tabs import-mode-tabs">
+              <button className={mode === "create" ? "active" : ""} onClick={() => switchMode("create")} disabled={importing}>
+                Add new employees
+              </button>
+              <button className={mode === "update" ? "active" : ""} onClick={() => switchMode("update")} disabled={importing}>
+                Update existing employees
+              </button>
+            </div>
+            {mode === "update" && (
+              <p className="admin-notice warn">
+                <Icon name="warning" size={15} />
+                Matches rows to people already in the directory by full name and fills in start date, team, date of birth, phone, address
+                and leave balances. Blank cells are left unchanged. No invites are sent.
+              </p>
+            )}
             <p className="muted small">
               Upload an .xlsx file with a heading row. Used columns: Name &amp; Surname (or Name + Surname), Email, Team, Start Date, Date of Birth, Phone Number, Address, City,
               Annual Leave and Sick Leave (days remaining today). Everyone is added as an Employee; other columns (gender, age) are ignored.
@@ -960,9 +1021,18 @@ function ImportEmployeesModal({
                         onChange={() => toggle(r.rowNumber)}
                       />
                       <span>
-                        <b>{r.fullName || "(no name)"}</b> · {r.email || "(no email)"} · {r.teamName || "no team"}
-                        {r.annualRemaining !== null && <> · {r.annualRemaining} annual</>}
-                        {r.sickRemaining !== null && <> · {r.sickRemaining} sick</>}
+                        {mode === "create" ? (
+                          <>
+                            <b>{r.fullName || "(no name)"}</b> · {r.email || "(no email)"} · {r.teamName || "no team"}
+                            {r.annualRemaining !== null && <> · {r.annualRemaining} annual</>}
+                            {r.sickRemaining !== null && <> · {r.sickRemaining} sick</>}
+                          </>
+                        ) : (
+                          <>
+                            <b>{r.fullName || "(no name)"}</b>
+                            {r.employeeId && <> → {updateSummary(r).join(", ") || "nothing to update"}</>}
+                          </>
+                        )}
                         {r.errors.map((m) => <em key={m} className="import-error"> {m}.</em>)}
                         {r.warnings.map((m) => <em key={m} className="import-warning"> {m}.</em>)}
                       </span>
@@ -975,7 +1045,11 @@ function ImportEmployeesModal({
             <div className="admin-modal-actions">
               <button type="button" className="outline-button" onClick={onClose} disabled={importing}>Cancel</button>
               <button className="primary-admin" onClick={handleImport} disabled={importing || selectedCount === 0}>
-                {importing ? `Inviting ${progress!.done}/${progress!.total}…` : `Import ${selectedCount || ""} & send invites`}
+                {importing
+                  ? `${mode === "create" ? "Inviting" : "Updating"} ${progress!.done}/${progress!.total}…`
+                  : mode === "create"
+                    ? `Import ${selectedCount || ""} & send invites`
+                    : `Update ${selectedCount || ""} employees`}
               </button>
             </div>
           </>

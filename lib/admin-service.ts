@@ -530,6 +530,7 @@ export async function setLeaveEntitlement(input: SetLeaveEntitlementInput): Prom
 
 export interface AdminAttendanceSession {
   id: string;
+  employeeId: string;
   state: string;
   clockedInAt: string | null;
   clockedOutAt: string | null;
@@ -542,7 +543,7 @@ export async function listAttendanceSessions(workDate: string): Promise<AdminAtt
   const { data, error } = await client()
     .from("attendance_sessions")
     .select(
-      "id,state,clocked_in_at,clocked_out_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
+      "id,employee_id,state,clocked_in_at,clocked_out_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
     )
     .eq("work_date", workDate)
     .order("clocked_in_at");
@@ -551,6 +552,7 @@ export async function listAttendanceSessions(workDate: string): Promise<AdminAtt
     const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
     return {
       id: row.id,
+      employeeId: row.employee_id,
       state: row.state,
       clockedInAt: row.clocked_in_at,
       clockedOutAt: row.clocked_out_at,
@@ -871,14 +873,49 @@ export interface DashboardStats {
   workingNow: number;
   pendingLeave: number;
   attendanceRate: number;
+  // Today's attendance panel
+  sessions: AdminAttendanceSession[];
+  notInYet: Array<{ id: string; fullName: string }>;
+  onLeave: Array<{ employeeName: string; leaveType: string }>;
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
+  // attendance_sessions.work_date defaults to the database's current_date (UTC),
+  // so "today" is taken in UTC here too to match it.
   const today = new Date().toISOString().slice(0, 10);
-  const [employees, sessions, pending] = await Promise.all([listEmployees(), listAttendanceSessions(today), listPendingLeaveRequests()]);
-  const workingNow = sessions.filter((s) => s.state === "working" || s.state === "on_break" || s.state === "on_lunch").length;
-  const attendanceRate = employees.length ? Math.round((sessions.length / employees.length) * 100) : 0;
-  return { totalEmployees: employees.length, workingNow, pendingLeave: pending.length, attendanceRate };
+  const [employees, sessions, pending, onLeave] = await Promise.all([
+    listEmployees(),
+    listAttendanceSessions(today),
+    listPendingLeaveRequests(),
+    client()
+      .rpc("who_is_on_leave_today")
+      .then(({ data, error }) => {
+        if (error) throw error;
+        return ((data ?? []) as Array<{ employee_name: string; leave_type: string }>).map((r) => ({ employeeName: r.employee_name, leaveType: r.leave_type }));
+      }),
+  ]);
+  // Only people expected to clock in: active, and not the shared kiosk account.
+  const staff = employees.filter((e) => e.active && e.role !== "kiosk");
+  const staffIds = new Set(staff.map((e) => e.id));
+  const staffSessions = sessions.filter((s) => staffIds.has(s.employeeId));
+  const clockedIn = new Set(staffSessions.map((s) => s.employeeId));
+  const onLeaveNames = new Set(onLeave.map((l) => l.employeeName));
+  const notInYet = staff
+    .filter((e) => !clockedIn.has(e.id) && !onLeaveNames.has(e.fullName))
+    .map((e) => ({ id: e.id, fullName: e.fullName }))
+    .sort((x, y) => x.fullName.localeCompare(y.fullName));
+  const workingNow = staffSessions.filter((s) => s.state === "working" || s.state === "on_break" || s.state === "on_lunch").length;
+  const expected = staff.length - onLeave.length;
+  const attendanceRate = expected > 0 ? Math.min(100, Math.round((staffSessions.length / expected) * 100)) : 0;
+  return {
+    totalEmployees: staff.length,
+    workingNow,
+    pendingLeave: pending.length,
+    attendanceRate,
+    sessions: staffSessions,
+    notInYet,
+    onLeave,
+  };
 }
 
 export interface AdminHoliday {

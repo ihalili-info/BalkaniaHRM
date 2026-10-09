@@ -367,3 +367,14 @@
   .table-head.cols-7 > b:nth-child(2), .table-row.cols-7 > span:nth-child(2),
   .table-head.cols-7 > b:nth-child(n+4):nth-child(-n+6), .table-row.cols-7 > span:nth-child(n+4):nth-child(-n+6) { display: none; }
 }
+
+/* Dashboard: today's attendance */
+.today-attendance { margin-top: 14px; }
+.attendance-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.attendance-list { list-style: none; margin: 14px 0 0; padding: 0; max-height: 360px; overflow-y: auto; }
+.attendance-list li { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.attendance-list li:last-child { border-bottom: 0; }
+.attendance-missing { margin-top: 12px; font-size: 13px; }
+.attendance-missing summary { cursor: pointer; font-weight: 600; color: var(--danger); }
+.attendance-missing p { margin-top: 6px; }
+@media (max-width: 800px) { .attendance-list li { grid-template-columns: 1fr auto; } .attendance-list li > :last-child { grid-column: 1 / -1; } }

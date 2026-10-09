@@ -476,6 +476,60 @@ function AdminShell({ profile }: { profile: Profile }) {
 
 type NoticeProps = { setNotice: (value: string) => void };
 
+const ATTENDANCE_GROUPS: Array<{ key: string; label: string; states: string[]; tone: string }> = [
+  { key: "working", label: "Working", states: ["working"], tone: "success" },
+  { key: "break", label: "On break / lunch", states: ["on_break", "on_lunch"], tone: "pending" },
+  { key: "done", label: "Finished", states: ["complete"], tone: "" },
+];
+
+function TodayAttendance({ stats }: { stats: DashboardStats }) {
+  const timeOf = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
+  const grouped = ATTENDANCE_GROUPS.map((g) => ({ ...g, rows: stats.sessions.filter((s) => g.states.includes(s.state)) }));
+
+  return (
+    <div className="today-attendance">
+      <div className="attendance-chips">
+        {grouped.map((g) => (
+          <span key={g.key} className={`pill ${g.tone}`}>{g.label}: {g.rows.length}</span>
+        ))}
+        <span className="pill danger">Not in yet: {stats.notInYet.length}</span>
+        <span className="pill">On leave: {stats.onLeave.length}</span>
+      </div>
+
+      {stats.sessions.length === 0 ? (
+        <p className="muted small">Nobody has clocked in yet today.</p>
+      ) : (
+        <ul className="attendance-list">
+          {grouped.flatMap((g) =>
+            g.rows.map((row) => (
+              <li key={row.id}>
+                <span className="person-cell">
+                  <i className="person-dot">{row.employeeName[0]}</i>
+                  <span className="person-name">{row.employeeName}</span>
+                </span>
+                <span className={`pill ${g.tone}`}>{stateLabel(row.state)}</span>
+                <span className="muted small">
+                  In {timeOf(row.clockedInAt)}{row.clockedOutAt ? ` · Out ${timeOf(row.clockedOutAt)}` : ""}
+                </span>
+              </li>
+            )),
+          )}
+        </ul>
+      )}
+
+      {stats.notInYet.length > 0 && (
+        <details className="attendance-missing">
+          <summary>Not clocked in yet ({stats.notInYet.length})</summary>
+          <p className="muted small">{stats.notInYet.map((e) => e.fullName).join(", ")}</p>
+        </details>
+      )}
+      {stats.onLeave.length > 0 && (
+        <p className="muted small">On leave today: {stats.onLeave.map((l) => l.employeeName).join(", ")}</p>
+      )}
+    </div>
+  );
+}
+
 function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -496,10 +550,10 @@ function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
   return (
     <>
       <div className="admin-stats">
-        <Stat label="Active employees" value={String(stats.totalEmployees)} note="All roles" />
-        <Stat label="Working now" value={String(stats.workingNow)} note="Live sessions" />
+        <Stat label="Active employees" value={String(stats.totalEmployees)} note="Excluding kiosk accounts" />
+        <Stat label="Working now" value={String(stats.workingNow)} note="Clocked in, incl. breaks" />
         <Stat label="Leave requests" value={String(stats.pendingLeave)} note="Awaiting review" />
-        <Stat label="Attendance rate" value={`${stats.attendanceRate}%`} note="Today" />
+        <Stat label="Attendance rate" value={`${stats.attendanceRate}%`} note="Clocked in today, excl. on leave" />
       </div>
       <div className="admin-grid">
         <section className="panel wide">
@@ -507,7 +561,7 @@ function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
             <h2>Today&apos;s attendance</h2>
             <button onClick={() => onNavigate("attendance")}>View report <Icon name="chevronRight" size={14} /></button>
           </div>
-          <p className="muted small">Open the attendance module for live clock-in status per employee.</p>
+          <TodayAttendance stats={stats} />
         </section>
         <section className="panel">
           <div className="panel-title"><h2>Quick actions</h2></div>

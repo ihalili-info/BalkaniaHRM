@@ -5,6 +5,22 @@ import { useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
 import { Icon } from "../components/icons";
 import { DateInput } from "../components/date-input";
+import {
+  SWAP_STATUS_LABELS,
+  addDays,
+  cancelShiftSwap,
+  formatShiftTime,
+  listRosterShifts,
+  listShiftSwaps,
+  listSwapOptions,
+  requestShiftSwap,
+  respondShiftSwap,
+  shiftBounds,
+  toIsoDate,
+  type RosterShift,
+  type ShiftSwap,
+  type SwapOption,
+} from "../lib/roster-service";
 import { changePassword, getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supabaseConfigured } from "../lib/auth-service";
 import { errorMessage } from "../lib/errors";
 import { recordAttendance } from "../lib/attendance-service";
@@ -35,7 +51,7 @@ import type {
   Profile,
 } from "../lib/domain";
 
-type Screen = "home" | "leaves" | "code" | "tracking" | "profile" | "documents" | "holidays" | "changePassword";
+type Screen = "home" | "leaves" | "code" | "tracking" | "profile" | "documents" | "holidays" | "changePassword" | "shifts";
 type AuthStatus = "loading" | "signedOut" | "needsSetup" | "deactivated" | "signedIn";
 type AttendanceAction = "clockOut" | "breakIn" | "breakOut" | "lunchIn" | "lunchOut";
 
@@ -453,6 +469,7 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
             {screen === "documents" && <DocumentsScreen notes={disciplinaryNotes} onBack={() => setScreen("profile")} />}
             {screen === "changePassword" && <ChangePasswordScreen onBack={() => setScreen("profile")} />}
             {screen === "holidays" && <HolidaysScreen onBack={() => setScreen("home")} />}
+            {screen === "shifts" && <ShiftsScreen profile={profile} onBack={() => setScreen("home")} />}
           </>
         )}
       </section>
@@ -503,6 +520,8 @@ function HomeScreen({
       </h1>
       <p className="muted">{stateText[attendanceState]}.</p>
 
+      <NextShiftCard profile={profile} onOpen={() => onNavigate("shifts")} />
+
       <section className="card">
         <div className="row">
           <h2>This month</h2>
@@ -527,9 +546,9 @@ function HomeScreen({
             <Icon name="clock" size={22} />
             <span>Attendance</span>
           </button>
-          <button onClick={() => onNavigate("code")}>
+          <button onClick={() => onNavigate("shifts")}>
             <Icon name="swap" size={22} />
-            <span>Shift swap</span>
+            <span>My shifts &amp; swaps</span>
           </button>
           <button onClick={() => onNavigate("holidays")}>
             <Icon name="calendar" size={22} />
@@ -1102,6 +1121,282 @@ function ChangePasswordScreen({ onBack }: { onBack: () => void }) {
         </button>
       </form>
     </>
+  );
+}
+
+
+// ---- shifts & swaps ----
+
+function shiftDayLabel(date: string) {
+  const today = toIsoDate(new Date());
+  const tomorrow = addDays(today, 1);
+  if (date === today) return "Today";
+  if (date === tomorrow) return "Tomorrow";
+  return new Date(`${date}T00:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+}
+
+function NextShiftCard({ profile, onOpen }: { profile: Profile; onOpen: () => void }) {
+  const [next, setNext] = useState<RosterShift | null | undefined>(undefined);
+
+  useEffect(() => {
+    const today = toIsoDate(new Date());
+    listRosterShifts(today, addDays(today, 14), { publishedOnly: true, employeeId: profile.id })
+      .then((rows) => setNext(rows.find((r) => shiftBounds(r).end.getTime() > Date.now()) ?? null))
+      .catch(() => setNext(null));
+  }, [profile.id]);
+
+  // Hidden for people who aren't on the roster at all.
+  if (!next) return null;
+  return (
+    <button className="card next-shift" onClick={onOpen}>
+      <span>
+        <span className="eyebrow">NEXT SHIFT</span>
+        <b>{shiftDayLabel(next.shiftDate)} · {formatShiftTime(next)}</b>
+        {next.note && <span className="muted small">{next.note}</span>}
+      </span>
+      <Icon name="chevronRight" size={18} className="muted-icon" />
+    </button>
+  );
+}
+
+function ShiftsScreen({ profile, onBack }: { profile: Profile; onBack: () => void }) {
+  const [shifts, setShifts] = useState<RosterShift[] | null>(null);
+  const [swaps, setSwaps] = useState<ShiftSwap[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [swapping, setSwapping] = useState<RosterShift | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const today = toIsoDate(new Date());
+
+  function load() {
+    Promise.all([listRosterShifts(today, addDays(today, 28), { publishedOnly: true, employeeId: profile.id }), listShiftSwaps()])
+      .then(([s, w]) => {
+        setShifts(s);
+        setSwaps(w);
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load your shifts.")));
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const incoming = swaps.filter((w) => w.targetEmployeeId === profile.id && w.status === "pending_colleague");
+  const mine = swaps.filter((w) => w.requesterId === profile.id);
+  // Dates of my shifts that already have a swap in progress (sent or received).
+  const openSwapDates = new Set(
+    swaps
+      .filter((w) => w.status === "pending_colleague" || w.status === "pending_approval")
+      .flatMap((w) => (w.requesterId === profile.id ? [w.requesterShift?.shiftDate] : [w.targetShift?.shiftDate]))
+      .filter((d): d is string => Boolean(d)),
+  );
+
+  async function act(id: string, fn: () => Promise<void>, message: string) {
+    setBusyId(id);
+    setNotice(null);
+    try {
+      await fn();
+      setNotice(message);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Something went wrong."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <>
+      <button className="text-button back" onClick={onBack}>
+        <Icon name="arrowLeft" size={16} /> Back
+      </button>
+      <h1>My shifts</h1>
+      <p className="muted">Your published shifts for the next 4 weeks. Days without a shift are days off.</p>
+      {notice && <div className="notice">{notice}</div>}
+      {swapping && (
+        <SwapRequestSheet
+          shift={swapping}
+          onClose={() => setSwapping(null)}
+          onSent={() => {
+            setSwapping(null);
+            setNotice("Swap request sent. Your colleague needs to accept it, then a manager approves it.");
+            load();
+          }}
+        />
+      )}
+
+      {incoming.length > 0 && (
+        <section className="card">
+          <h2>Swap requests for you</h2>
+          <ul className="leave-list">
+            {incoming.map((w) => (
+              <li key={w.id} className="document-note">
+                <div>
+                  <b>{w.requesterName} wants to swap</b>
+                  <span className="muted small">
+                    You take: {w.requesterShift ? `${shiftDayLabel(w.requesterShift.shiftDate)} ${formatShiftTime(w.requesterShift)}` : "—"}
+                  </span>
+                  <span className="muted small">
+                    {w.targetShift ? `You give: ${shiftDayLabel(w.targetShift.shiftDate)} ${formatShiftTime(w.targetShift)}` : "Nothing in return (covering their shift)"}
+                  </span>
+                  {w.message && <span className="muted small">“{w.message}”</span>}
+                  <div className="swap-actions">
+                    <button className="secondary-button" disabled={busyId === w.id} onClick={() => act(w.id, () => respondShiftSwap(w.id, true), "Accepted — waiting for manager approval.")}>
+                      Accept
+                    </button>
+                    <button className="danger-button" disabled={busyId === w.id} onClick={() => act(w.id, () => respondShiftSwap(w.id, false), "Swap declined.")}>
+                      Decline
+                    </button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="card">
+        <h2>Upcoming</h2>
+        {error ? (
+          <p className="muted small">{error}</p>
+        ) : !shifts ? (
+          <p className="muted small">Loading…</p>
+        ) : shifts.length === 0 ? (
+          <p className="muted small">No published shifts yet. Your manager publishes the roster each week.</p>
+        ) : (
+          <ul className="leave-list">
+            {shifts.map((shift) => {
+              const canSwap = shift.shiftDate > today && !openSwapDates.has(shift.shiftDate);
+              return (
+                <li key={shift.id}>
+                  <div>
+                    <b>{shiftDayLabel(shift.shiftDate)}</b>
+                    <span className="muted small">
+                      {formatShiftTime(shift)}
+                      {shift.unpaidBreakMinutes > 0 ? ` · ${shift.unpaidBreakMinutes} min unpaid break` : ""}
+                      {shift.note ? ` · ${shift.note}` : ""}
+                    </span>
+                  </div>
+                  {canSwap ? (
+                    <button className="text-button" onClick={() => setSwapping(shift)}>
+                      <Icon name="swap" size={15} /> Swap
+                    </button>
+                  ) : (
+                    shift.shiftDate > today && <span className="pill pending">Swap pending</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {mine.length > 0 && (
+        <section className="card">
+          <h2>My swap requests</h2>
+          <ul className="leave-list">
+            {mine.slice(0, 10).map((w) => (
+              <li key={w.id} className="document-note">
+                <div>
+                  <b>
+                    {w.requesterShift ? `${shiftDayLabel(w.requesterShift.shiftDate)} ${formatShiftTime(w.requesterShift)}` : "Shift"} → {w.targetName}
+                  </b>
+                  <span className="muted small">{w.targetShift ? `For their ${shiftDayLabel(w.targetShift.shiftDate)} ${formatShiftTime(w.targetShift)}` : "They cover it"}</span>
+                  <span className={`pill ${w.status === "approved" ? "success" : w.status.startsWith("pending") ? "pending" : w.status === "rejected" || w.status === "declined" ? "danger" : ""}`}>
+                    {SWAP_STATUS_LABELS[w.status]}
+                  </span>
+                  {w.decisionNote && <span className="muted small">“{w.decisionNote}”</span>}
+                  {(w.status === "pending_colleague" || w.status === "pending_approval") && (
+                    <button className="text-button" disabled={busyId === w.id} onClick={() => act(w.id, () => cancelShiftSwap(w.id), "Swap request cancelled.")}>
+                      Cancel request
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
+  );
+}
+
+function SwapRequestSheet({ shift, onClose, onSent }: { shift: RosterShift; onClose: () => void; onSent: () => void }) {
+  const [options, setOptions] = useState<SwapOption[] | null>(null);
+  const [choice, setChoice] = useState<string>("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    listSwapOptions(shift.id)
+      .then(setOptions)
+      .catch((err) => setError(errorMessage(err, "Couldn't load colleagues.")));
+  }, [shift.id]);
+
+  // Option key: "<employeeId>|<shiftId or 'cover'>"
+  const keyOf = (o: SwapOption) => `${o.employeeId}|${o.shiftId ?? "cover"}`;
+  const covers = options?.filter((o) => !o.shiftId) ?? [];
+  const trades = options?.filter((o) => o.shiftId) ?? [];
+
+  async function send() {
+    const picked = options?.find((o) => keyOf(o) === choice);
+    if (!picked) return setError("Choose a colleague.");
+    setSending(true);
+    setError(null);
+    try {
+      await requestShiftSwap(shift.id, picked.employeeId, picked.shiftId, message);
+      onSent();
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't send the request."));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <h2>Swap {shiftDayLabel(shift.shiftDate)} {formatShiftTime(shift)}</h2>
+        <p className="muted small">Pick a teammate. They accept first, then a manager approves before the roster changes.</p>
+        {!options ? (
+          <p className="muted small">{error ?? "Loading…"}</p>
+        ) : options.length === 0 ? (
+          <p className="muted small">No teammates available to swap with.</p>
+        ) : (
+          <label>
+            Swap with
+            <select value={choice} onChange={(e) => setChoice(e.target.value)} disabled={sending}>
+              <option value="">Choose…</option>
+              {covers.length > 0 && (
+                <optgroup label="Free that day — they cover your shift">
+                  {covers.map((o) => (
+                    <option key={keyOf(o)} value={keyOf(o)}>{o.employeeName}</option>
+                  ))}
+                </optgroup>
+              )}
+              {trades.length > 0 && (
+                <optgroup label="Trade for one of their shifts">
+                  {trades.map((o) => (
+                    <option key={keyOf(o)} value={keyOf(o)}>
+                      {o.employeeName} — {shiftDayLabel(o.shiftDate)} {o.startsAt?.slice(0, 5)}–{o.endsAt?.slice(0, 5)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </label>
+        )}
+        <label>
+          Message (optional)
+          <textarea value={message} onChange={(e) => setMessage(e.target.value)} disabled={sending} placeholder="e.g. Doctor's appointment that morning" />
+        </label>
+        {error && options && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+        <button className="primary-button" onClick={send} disabled={sending || !choice}>{sending ? "Sending…" : "Send swap request"}</button>
+        <button className="secondary-button" onClick={onClose} disabled={sending}>Cancel</button>
+      </div>
+    </div>
   );
 }
 

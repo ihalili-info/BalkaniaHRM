@@ -3,7 +3,44 @@
 import { useEffect, useMemo, useState } from "react";
 import "./admin.css";
 import { Icon } from "../../components/icons";
-import { DateInput } from "../../components/date-input";
+import { DateInput, parseDateInput } from "../../components/date-input";
+import {
+  SWAP_STATUS_LABELS,
+  addDays,
+  assignRotation,
+  clearDrafts,
+  copyPreviousWeek,
+  decideShiftSwap,
+  deleteRosterShift,
+  deleteRotation,
+  deleteRotationAssignment,
+  endRotationAssignment,
+  fillRoster,
+  LATE_GRACE_MINUTES,
+  formatLate,
+  formatShiftTime,
+  matchShiftsToAttendance,
+  listApprovedLeave,
+  listRosterShifts,
+  listRotationAssignments,
+  listRotations,
+  listScheduleAssignments,
+  listShiftSwaps,
+  listTeamDefaults,
+  publishRoster,
+  rotationScheduleOn,
+  saveRosterShift,
+  saveRotation,
+  setEmployeeSchedule,
+  setTeamSchedule,
+  shiftHours,
+  toIsoDate,
+  weekStart,
+  type RosterShift,
+  type Rotation,
+  type RotationAssignment,
+  type ShiftSwap,
+} from "../../lib/roster-service";
 import { getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supabaseConfigured } from "../../lib/auth-service";
 import { getLeaveBalances, getLeaveRequests, getMyProfile, submitLeaveRequest } from "../../lib/employee-service";
 import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../lib/domain";
@@ -102,6 +139,7 @@ import {
   setOpeningLeaveBalance,
   updateAttendanceLocation,
   updateEmployee,
+  updateWorkSchedule,
   updateEmployeeEmail,
   updateTeam,
   upsertEmployeeDetails,
@@ -347,7 +385,7 @@ function AdminLogin({ configured }: { configured: boolean }) {
 // password resets. RLS scopes the profiles they can read to their own people,
 // and every HR-only action inside the module is gated on isHrAdmin.
 // "recruitment" shows supervisors only the jobs HR put them on the hiring team for (RLS).
-const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees", "recruitment"];
+const MANAGER_MODULES: Module[] = ["attendance", "timesheets", "leaves", "disciplinary", "employees", "recruitment", "schedules"];
 
 // Modules that only render a "coming in a later release" placeholder. They're
 // kept out of the sidebar so the menu only offers things that work; drop an
@@ -475,7 +513,7 @@ function AdminShell({ profile }: { profile: Profile }) {
           <EmptyPanel icon="chart" title="Performance Review" note="Goals, reviews, and feedback cycles are coming in a later release." />
         )}
         {module === "payroll" && <Payroll setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
-        {module === "schedules" && <Schedules setNotice={setNotice} />}
+        {module === "schedules" && <WorkSchedules setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
         {module === "devices" && <Devices setNotice={setNotice} />}
         {module === "locations" && <AttendanceLocations setNotice={setNotice} />}
         {module === "assets" && <Assets setNotice={setNotice} />}
@@ -499,6 +537,10 @@ const ATTENDANCE_GROUPS: Array<{ key: string; label: string; states: string[]; t
 function TodayAttendance({ stats }: { stats: DashboardStats }) {
   const timeOf = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
   const grouped = ATTENDANCE_GROUPS.map((g) => ({ ...g, rows: stats.sessions.filter((s) => g.states.includes(s.state)) }));
+  const rosterByEmployee = new Map(stats.rosterToday.map((r) => [r.shift.employeeId, r]));
+  const late = stats.rosterToday.filter((r) => r.status === "late");
+  const noShows = stats.rosterToday.filter((r) => r.status === "no_show");
+  const usesRoster = stats.rosterToday.length > 0;
 
   return (
     <div className="today-attendance">
@@ -506,9 +548,19 @@ function TodayAttendance({ stats }: { stats: DashboardStats }) {
         {grouped.map((g) => (
           <span key={g.key} className={`pill ${g.tone}`}>{g.label}: {g.rows.length}</span>
         ))}
-        <span className="pill danger">Not in yet: {stats.notInYet.length}</span>
+        {usesRoster && <span className="pill pending">Late: {late.length}</span>}
+        {usesRoster && <span className="pill danger">No-show: {noShows.length}</span>}
+        <span className="pill">{usesRoster ? "Due in" : "Not in yet"}: {stats.notInYet.length - noShows.length}</span>
         <span className="pill">On leave: {stats.onLeave.length}</span>
       </div>
+      {noShows.length > 0 && (
+        <div className="admin-notice">
+          <Icon name="warning" size={15} />
+          <span>
+            <b>No-show:</b> {noShows.map((r) => `${r.employeeName} (${formatShiftTime(r.shift)})`).join(", ")}
+          </span>
+        </div>
+      )}
 
       {stats.sessions.length === 0 ? (
         <p className="muted small">Nobody has clocked in yet today.</p>
@@ -524,6 +576,10 @@ function TodayAttendance({ stats }: { stats: DashboardStats }) {
                 <span className={`pill ${g.tone}`}>{stateLabel(row.state)}</span>
                 <span className="muted small">
                   In {timeOf(row.clockedInAt)}{row.clockedOutAt ? ` · Out ${timeOf(row.clockedOutAt)}` : ""}
+                  {rosterByEmployee.get(row.employeeId) && <> · Shift {formatShiftTime(rosterByEmployee.get(row.employeeId)!.shift)}</>}
+                  {rosterByEmployee.get(row.employeeId)?.status === "late" && (
+                    <b className="late-flag"> · {formatLate(rosterByEmployee.get(row.employeeId)!.lateMinutes)}</b>
+                  )}
                 </span>
               </li>
             )),
@@ -531,10 +587,17 @@ function TodayAttendance({ stats }: { stats: DashboardStats }) {
         </ul>
       )}
 
-      {stats.notInYet.length > 0 && (
+      {stats.notInYet.length - noShows.length > 0 && (
         <details className="attendance-missing">
-          <summary>Not clocked in yet ({stats.notInYet.length})</summary>
-          <p className="muted small">{stats.notInYet.map((e) => e.fullName).join(", ")}</p>
+          <summary>{usesRoster ? "Rostered, not in yet" : "Not clocked in yet"} ({stats.notInYet.length - noShows.length})</summary>
+          <p className="muted small">
+            {usesRoster
+              ? stats.rosterToday
+                  .filter((r) => r.status === "awaiting" || r.status === "upcoming")
+                  .map((r) => `${r.employeeName} (${formatShiftTime(r.shift)})`)
+                  .join(", ")
+              : stats.notInYet.map((e) => e.fullName).join(", ")}
+          </p>
         </details>
       )}
       {stats.onLeave.length > 0 && (
@@ -1884,13 +1947,24 @@ function Timesheets({ setNotice }: NoticeProps) {
   const [startDate, setStartDate] = useState(() => new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10));
   const [endDate, setEndDate] = useState(() => now.toISOString().slice(0, 10));
   const [rows, setRows] = useState<AdminTimesheetRow[] | null>(null);
+  // Published roster for the range; empty when the roster isn't used.
+  const [roster, setRoster] = useState<RosterShift[]>([]);
+  const [names, setNames] = useState<Map<string, { name: string; code: string }>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
   function load() {
     setRows(null);
-    listTimesheet(startDate, endDate)
-      .then(setRows)
+    Promise.all([
+      listTimesheet(startDate, endDate),
+      listRosterShifts(startDate, endDate, { publishedOnly: true }).catch(() => [] as RosterShift[]),
+      listEmployees().catch(() => [] as AdminEmployee[]),
+    ])
+      .then(([sheet, shifts, employees]) => {
+        setRoster(shifts);
+        setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode }])));
+        setRows(sheet);
+      })
       .catch((err) => setError(errorMessage(err, "Couldn't load the timesheet.")));
   }
 
@@ -1924,8 +1998,38 @@ function Timesheets({ setNotice }: NoticeProps) {
         });
       }
     }
+    // Rostered people who never clocked in still need a row, or no-shows vanish.
+    for (const shift of roster) {
+      if (!byEmployee.has(shift.employeeId)) {
+        const who = names.get(shift.employeeId);
+        byEmployee.set(shift.employeeId, {
+          employeeId: shift.employeeId,
+          employeeName: who?.name ?? "Unknown",
+          employeeCode: who?.code ?? "",
+          days: 0,
+          hours: 0,
+          breakHours: 0,
+          lunchHours: 0,
+        });
+      }
+    }
     summaries.push(...Array.from(byEmployee.values()).sort((a, b) => a.employeeName.localeCompare(b.employeeName)));
   }
+  const rosterMatches = rows
+    ? matchShiftsToAttendance(roster, rows.map((r) => ({ employeeId: r.employeeId, clockedInAt: r.clockedInAt })))
+    : [];
+  const rosterStats = new Map<string, { scheduled: number; late: number; noShows: number }>();
+  for (const m of rosterMatches) {
+    const entry = rosterStats.get(m.shift.employeeId) ?? { scheduled: 0, late: 0, noShows: 0 };
+    entry.scheduled += shiftHours(m.shift);
+    if (m.status === "late") entry.late += 1;
+    if (m.status === "no_show") entry.noShows += 1;
+    rosterStats.set(m.shift.employeeId, entry);
+  }
+  const usesRoster = roster.length > 0;
+  const totalScheduled = rosterMatches.reduce((sum, m) => sum + shiftHours(m.shift), 0);
+  const totalLate = rosterMatches.filter((m) => m.status === "late").length;
+  const totalNoShows = rosterMatches.filter((m) => m.status === "no_show").length;
   const totalHours = summaries.reduce((sum, s) => sum + s.hours, 0);
   const totalBreakHours = summaries.reduce((sum, s) => sum + s.breakHours, 0);
   const totalLunchHours = summaries.reduce((sum, s) => sum + s.lunchHours, 0);
@@ -1939,17 +2043,31 @@ function Timesheets({ setNotice }: NoticeProps) {
     try {
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Employee", "Employee code", "Date", "Clock in", "Clock out", "Worked hours", "Break minutes", "Lunch minutes"],
-        rows.map((row) => [
-          row.employeeName,
-          row.employeeCode,
-          row.workDate,
-          row.clockedInAt ? formatTime(row.clockedInAt) : "",
-          row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
-          Math.round(hoursWorked(row) * 100) / 100,
-          Math.round(breakHours(row) * 60),
-          Math.round(lunchHours(row) * 60),
-        ]),
+        ["Employee", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes"],
+        [
+          ...rows.map((row) => {
+            const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
+            return [
+              row.employeeName,
+              row.employeeCode,
+              row.workDate,
+              match ? formatShiftTime(match.shift) : "",
+              row.clockedInAt ? formatTime(row.clockedInAt) : "",
+              row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
+              Math.round(hoursWorked(row) * 100) / 100,
+              match?.status === "late" ? match.lateMinutes : "",
+              Math.round(breakHours(row) * 60),
+              Math.round(lunchHours(row) * 60),
+            ];
+          }),
+          // No-shows have no attendance row of their own.
+          ...rosterMatches
+            .filter((m) => m.status === "no_show")
+            .map((m) => {
+              const who = names.get(m.shift.employeeId);
+              return [who?.name ?? "Unknown", who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", ""];
+            }),
+        ],
       );
     } finally {
       setExporting(false);
@@ -1976,8 +2094,17 @@ function Timesheets({ setNotice }: NoticeProps) {
       <div className="admin-stats">
         <Stat label="Employees" value={String(summaries.length)} note="In range" />
         <Stat label="Worked hours" value={totalHours.toFixed(1)} note={summaries.length ? `${(totalHours / summaries.length).toFixed(1)} avg. per employee` : "All employees"} />
-        <Stat label="Break time" value={formatDurationHours(totalBreakHours)} note="All employees" />
-        <Stat label="Lunch time" value={formatDurationHours(totalLunchHours)} note="All employees" />
+        {usesRoster ? (
+          <>
+            <Stat label="Scheduled hours" value={totalScheduled.toFixed(1)} note="Published roster, paid time" />
+            <Stat label="Late / no-show" value={`${totalLate} / ${totalNoShows}`} note={`Late = over ${LATE_GRACE_MINUTES} min after shift start`} />
+          </>
+        ) : (
+          <>
+            <Stat label="Break time" value={formatDurationHours(totalBreakHours)} note="All employees" />
+            <Stat label="Lunch time" value={formatDurationHours(totalLunchHours)} note="All employees" />
+          </>
+        )}
       </div>
       {error ? (
         <ErrorState message={error} />
@@ -1988,19 +2115,46 @@ function Timesheets({ setNotice }: NoticeProps) {
       ) : (
         <section className="panel">
           <div className="panel-title"><h2>Timesheet overview</h2><span className="filter">{formatDate(startDate)} – {formatDate(endDate)}</span></div>
-          <div className="table-head cols-6">
-            <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b>
-          </div>
-          {summaries.map((summary) => (
-            <div className="table-row cols-6" key={summary.employeeId}>
-              <span>{summary.employeeName}</span>
-              <span>{summary.employeeCode}</span>
-              <span>{summary.days}</span>
-              <span>{summary.hours.toFixed(1)}h</span>
-              <span>{formatDurationHours(summary.breakHours)}</span>
-              <span>{formatDurationHours(summary.lunchHours)}</span>
-            </div>
-          ))}
+          {usesRoster ? (
+            <>
+              <div className="table-head cols-7">
+                <b>Employee</b><b>Days worked</b><b>Scheduled</b><b>Worked</b><b>Late</b><b>No-shows</b><b>Breaks</b>
+              </div>
+              {summaries.map((summary) => {
+                const r = rosterStats.get(summary.employeeId);
+                return (
+                  <div className="table-row cols-7" key={summary.employeeId}>
+                    <span>
+                      {summary.employeeName}
+                      <em className="asset-sub">{summary.employeeCode}</em>
+                    </span>
+                    <span>{summary.days}</span>
+                    <span>{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>
+                    <span className={r && summary.hours < r.scheduled - 0.25 ? "under-hours" : undefined}>{summary.hours.toFixed(1)}h</span>
+                    <span>{r?.late ? <span className="pill pending">{r.late}</span> : "0"}</span>
+                    <span>{r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}</span>
+                    <span>{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
+                  </div>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              <div className="table-head cols-6">
+                <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b>
+              </div>
+              {summaries.map((summary) => (
+                <div className="table-row cols-6" key={summary.employeeId}>
+                  <span>{summary.employeeName}</span>
+                  <span>{summary.employeeCode}</span>
+                  <span>{summary.days}</span>
+                  <span>{summary.hours.toFixed(1)}h</span>
+                  <span>{formatDurationHours(summary.breakHours)}</span>
+                  <span>{formatDurationHours(summary.lunchHours)}</span>
+                </div>
+              ))}
+            </>
+          )}
         </section>
       )}
     </>
@@ -3118,16 +3272,73 @@ function AddHolidayModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
   );
 }
 
-function Schedules({ setNotice }: NoticeProps) {
+
+// Postgres ISO day-of-week numbering (1 = Monday) to match the working_days
+// column's default of {1,2,3,4,5}.
+// ---- Work schedules: shift templates, roster, rotations, swaps ----
+
+type ScheduleTab = "shifts" | "roster" | "rotations" | "calendar" | "swaps";
+
+const SHIFT_COLORS = ["#232b6a", "#eb1948", "#1f9d5a", "#2b6cd6", "#b0740a", "#7c3aed", "#0e7490", "#6b7280"];
+
+function WorkSchedules({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+  const [tab, setTab] = useState<ScheduleTab>(isHrAdmin ? "shifts" : "roster");
+  const [pendingSwaps, setPendingSwaps] = useState(0);
+
+  useEffect(() => {
+    listShiftSwaps()
+      .then((rows) => setPendingSwaps(rows.filter((r) => r.status === "pending_approval").length))
+      .catch(() => setPendingSwaps(0));
+  }, [tab]);
+
+  const tabs: Array<[ScheduleTab, string]> = [
+    ...(isHrAdmin ? ([["shifts", "Shifts"]] as Array<[ScheduleTab, string]>) : []),
+    ["roster", "Roster"],
+    ["rotations", "Shift rotations"],
+    ["calendar", "Rotations calendar"],
+    ["swaps", "Swap requests"],
+  ];
+
+  return (
+    <>
+      <div className="module-tabs">
+        {tabs.map(([key, label]) => (
+          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
+            {label}
+            {key === "swaps" && pendingSwaps > 0 && <span className="tab-badge">{pendingSwaps}</span>}
+          </button>
+        ))}
+      </div>
+      {tab === "shifts" && isHrAdmin && <ShiftTemplates setNotice={setNotice} />}
+      {tab === "roster" && <RosterView setNotice={setNotice} />}
+      {tab === "rotations" && <RotationsView setNotice={setNotice} isHrAdmin={isHrAdmin} />}
+      {tab === "calendar" && <RotationsCalendar />}
+      {tab === "swaps" && <SwapRequestsAdmin setNotice={setNotice} onChanged={(n) => setPendingSwaps(n)} />}
+    </>
+  );
+}
+
+function templateHours(t: AdminWorkSchedule) {
+  return shiftHours({ shiftDate: "2026-01-05", startsAt: t.startsAt, endsAt: t.endsAt, unpaidBreakMinutes: t.unpaidBreakMinutes });
+}
+
+function formatHours(hours: number) {
+  return `${Math.round(hours * 100) / 100}h`;
+}
+
+// -- Shifts tab: templates + who uses which by default --
+
+function ShiftTemplates({ setNotice }: NoticeProps) {
   const [rows, setRows] = useState<AdminWorkSchedule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showModal, setShowModal] = useState(false);
+  const [editing, setEditing] = useState<AdminWorkSchedule | "new" | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
 
   function load() {
     listWorkSchedules()
       .then(setRows)
-      .catch((err) => setError(errorMessage(err, "Couldn't load schedules.")));
+      .catch((err) => setError(errorMessage(err, "Couldn't load shift templates.")));
   }
 
   useEffect(() => {
@@ -3135,14 +3346,740 @@ function Schedules({ setNotice }: NoticeProps) {
   }, []);
 
   async function handleDelete(row: AdminWorkSchedule) {
-    if (!window.confirm(`Delete the "${row.name}" shift template?`)) return;
+    if (!window.confirm(`Delete the "${row.name}" template? Existing roster shifts keep their times; people using it as their default fall back to the team or company default.`)) return;
     setBusyId(row.id);
     try {
       await deleteWorkSchedule(row.id);
-      setNotice(`Shift template "${row.name}" deleted.`);
+      setNotice(`Template "${row.name}" deleted.`);
       load();
     } catch (err) {
-      setNotice(errorMessage(err, "Couldn't delete the shift template."));
+      setNotice(errorMessage(err, "Couldn't delete the template."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const visible = rows?.filter((r) => matchesSearch(search, r.name, r.branchName)) ?? null;
+
+  return (
+    <>
+      <Toolbar action="Add template" onAction={() => setEditing("new")} search={search} onSearch={setSearch} searchPlaceholder="Search templates" />
+      {editing && (
+        <ShiftTemplateModal
+          template={editing === "new" ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={(t) => {
+            setEditing(null);
+            setNotice(`Template "${t.name}" saved.`);
+            load();
+          }}
+        />
+      )}
+      {error ? (
+        <ErrorState message={error} />
+      ) : !visible ? (
+        <LoadingPanel />
+      ) : visible.length === 0 ? (
+        <EmptyPanel icon="swap" title="No shift templates" note="Create a template like 'Warehouse day 08:00–16:30' to build the roster from." />
+      ) : (
+        <div className="template-list">
+          {visible.map((t) => (
+            <section className="panel template-card" key={t.id} style={{ "--shift-color": t.color } as React.CSSProperties}>
+              <div className="template-head">
+                <span className="template-swatch" aria-hidden="true" />
+                <div>
+                  <h2>
+                    {t.name} {t.isDefault && <span className="pill success">Company default</span>}
+                  </h2>
+                  <p className="muted small">{t.branchName ?? "All locations"}</p>
+                </div>
+                <span className="row-actions">
+                  <button className="outline-button" onClick={() => setEditing(t)} disabled={busyId === t.id}>
+                    <Icon name="edit" size={14} /> Edit
+                  </button>
+                  <button className="icon-action reject" onClick={() => handleDelete(t)} disabled={busyId === t.id} aria-label={`Delete ${t.name}`}>
+                    <Icon name="trash" size={15} />
+                  </button>
+                </span>
+              </div>
+              <div className="template-chips">
+                <span className="pill"><Icon name="calendar" size={12} /> {t.workingDays.length} working days</span>
+                <span className="pill"><Icon name="clock" size={12} /> {t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)} · {formatHours(templateHours(t))} paid</span>
+                {t.unpaidBreakMinutes > 0 && <span className="pill pending"><Icon name="utensils" size={12} /> {t.unpaidBreakMinutes} min break · unpaid</span>}
+              </div>
+              <div className="weekday-pills">
+                {weekdayOptions.map(([day, label]) => (
+                  <span key={day} className={t.workingDays.includes(day) ? "on" : ""}>{label}</span>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+      {rows && rows.length > 0 && <ScheduleDefaults templates={rows} setNotice={setNotice} />}
+    </>
+  );
+}
+
+function ShiftTemplateModal({
+  template,
+  onClose,
+  onSaved,
+}: {
+  template: AdminWorkSchedule | null;
+  onClose: () => void;
+  onSaved: (t: AdminWorkSchedule) => void;
+}) {
+  const [name, setName] = useState(template?.name ?? "");
+  const [branchName, setBranchName] = useState(template?.branchName ?? "");
+  const [startsAt, setStartsAt] = useState(template?.startsAt.slice(0, 5) ?? "09:00");
+  const [endsAt, setEndsAt] = useState(template?.endsAt.slice(0, 5) ?? "17:00");
+  const [unpaidBreak, setUnpaidBreak] = useState(String(template?.unpaidBreakMinutes ?? 30));
+  const [workingDays, setWorkingDays] = useState<number[]>(template?.workingDays ?? [1, 2, 3, 4, 5]);
+  const [color, setColor] = useState(template?.color ?? SHIFT_COLORS[0]);
+  const [isDefault, setIsDefault] = useState(template?.isDefault ?? false);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function toggleDay(day: number) {
+    setWorkingDays((current) => (current.includes(day) ? current.filter((d) => d !== day) : [...current, day].sort((a, b) => a - b)));
+  }
+
+  const breakMinutes = Number(unpaidBreak);
+  const overnight = endsAt <= startsAt;
+  const paid = shiftHours({ shiftDate: "2026-01-05", startsAt, endsAt, unpaidBreakMinutes: Number.isFinite(breakMinutes) ? breakMinutes : 0 });
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!workingDays.length) return setError("Pick at least one working day.");
+    if (startsAt === endsAt) return setError("Start and end can't be the same time.");
+    if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
+    setError(null);
+    setSaving(true);
+    try {
+      const input = { name, branchName: branchName || null, startsAt, endsAt, workingDays, isDefault, color, unpaidBreakMinutes: breakMinutes };
+      const saved = template ? await updateWorkSchedule(template.id, input) : await createWorkSchedule(input);
+      onSaved(saved);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save the template."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>{template ? "Edit template" : "Add template"}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Name
+            <input required value={name} onChange={(e) => setName(e.target.value)} disabled={saving} placeholder="e.g. Warehouse day" />
+          </label>
+          <label>
+            Location <span className="field-optional">optional</span>
+            <input value={branchName} onChange={(e) => setBranchName(e.target.value)} disabled={saving} placeholder="All locations" />
+          </label>
+          <label>
+            Starts at
+            <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Ends at
+            <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
+            {overnight && startsAt !== endsAt && <small className="field-hint">Night shift — ends the next day.</small>}
+          </label>
+          <label>
+            Unpaid break (minutes)
+            <input type="number" min={0} max={480} step={5} value={unpaidBreak} onChange={(e) => setUnpaidBreak(e.target.value)} disabled={saving} />
+            <small className="field-hint">{formatHours(paid)} paid per shift.</small>
+          </label>
+          <label>
+            Colour
+            <span className="swatch-row">
+              {SHIFT_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  className={`swatch${color === c ? " selected" : ""}`}
+                  style={{ background: c }}
+                  onClick={() => setColor(c)}
+                  aria-label={`Colour ${c}`}
+                  aria-pressed={color === c}
+                  disabled={saving}
+                />
+              ))}
+            </span>
+          </label>
+          <h3 className="form-section">Working days</h3>
+          <div className="weekday-picker" style={{ gridColumn: "1 / -1" }}>
+            {weekdayOptions.map(([day, label]) => (
+              <button key={day} type="button" className={workingDays.includes(day) ? "active" : ""} onClick={() => toggleDay(day)} disabled={saving} aria-pressed={workingDays.includes(day)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <label className="checkbox-row">
+            <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} disabled={saving} />
+            <span>
+              Company default
+              <small className="field-hint">Used for anyone without their own or a team template when filling the roster.</small>
+            </span>
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save template"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Default template per team and per-employee overrides.
+function ScheduleDefaults({ templates, setNotice }: NoticeProps & { templates: AdminWorkSchedule[] }) {
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [teamDefaults, setTeamDefaults] = useState<Map<string, string | null>>(new Map());
+  const [employees, setEmployees] = useState<AdminEmployee[]>([]);
+  const [assignments, setAssignments] = useState<Map<string, string>>(new Map());
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([listTeams(), listTeamDefaults(), listEmployees(), listScheduleAssignments()])
+      .then(([t, td, e, a]) => {
+        setTeams(t);
+        setTeamDefaults(td);
+        setEmployees(e.filter((x) => x.active && x.role !== "kiosk"));
+        setAssignments(new Map(a.map((x) => [x.employeeId, x.scheduleId])));
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const companyDefault = templates.find((t) => t.isDefault) ?? null;
+  const nameOf = (id: string | null | undefined) => templates.find((t) => t.id === id)?.name ?? null;
+
+  async function changeTeam(teamId: string, scheduleId: string) {
+    setBusy(teamId);
+    try {
+      await setTeamSchedule(teamId, scheduleId || null);
+      setTeamDefaults((prev) => new Map(prev).set(teamId, scheduleId || null));
+      setNotice("Team default saved.");
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't save the team default."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function changeEmployee(employeeId: string, scheduleId: string) {
+    setBusy(employeeId);
+    try {
+      await setEmployeeSchedule(employeeId, scheduleId || null);
+      setAssignments((prev) => {
+        const next = new Map(prev);
+        if (scheduleId) next.set(employeeId, scheduleId);
+        else next.delete(employeeId);
+        return next;
+      });
+      setNotice("Employee template saved.");
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't save the employee template."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const visibleEmployees = employees.filter((e) => matchesSearch(search, e.fullName, e.teamName));
+
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <h2>Who works which template</h2>
+      </div>
+      <p className="muted small">
+        Used by <b>Fill week</b> on the Roster: an employee&apos;s own template wins, then their team&apos;s, then the company default
+        ({companyDefault?.name ?? "none set"}). Rotations override all of these.
+      </p>
+      <h3 className="form-section">Teams</h3>
+      {teams.map((team) => (
+        <div className="table-row defaults-row" key={team.id}>
+          <span>{team.name}</span>
+          <select value={teamDefaults.get(team.id) ?? ""} onChange={(e) => changeTeam(team.id, e.target.value)} disabled={busy === team.id}>
+            <option value="">Company default</option>
+            {templates.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </div>
+      ))}
+      <h3 className="form-section">Employees</h3>
+      <div className="search-input defaults-search">
+        <Icon name="search" size={15} />
+        <input type="search" placeholder="Search employees" aria-label="Search employees" value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      {visibleEmployees.map((e) => {
+        const teamTemplate = e.teamId ? nameOf(teamDefaults.get(e.teamId)) : null;
+        return (
+          <div className="table-row defaults-row" key={e.id}>
+            <span>
+              {e.fullName}
+              <em className="asset-sub">{e.teamName ?? "No team"}</em>
+            </span>
+            <select value={assignments.get(e.id) ?? ""} onChange={(ev) => changeEmployee(e.id, ev.target.value)} disabled={busy === e.id}>
+              <option value="">{teamTemplate ? `Team default (${teamTemplate})` : `Company default${companyDefault ? ` (${companyDefault.name})` : ""}`}</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+// -- Roster tab: employees x days for one week --
+
+function RosterView({ setNotice }: NoticeProps) {
+  const [week, setWeek] = useState(() => weekStart(toIsoDate(new Date())));
+  const [employees, setEmployees] = useState<AdminEmployee[] | null>(null);
+  const [templates, setTemplates] = useState<AdminWorkSchedule[]>([]);
+  const [shifts, setShifts] = useState<RosterShift[]>([]);
+  const [leave, setLeave] = useState<Array<{ employeeId: string; startsOn: string; endsOn: string; leaveType: string }>>([]);
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [teamFilter, setTeamFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ employee: AdminEmployee; date: string; shift: RosterShift | null } | null>(null);
+
+  const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
+  const weekEnd = days[6];
+  const today = toIsoDate(new Date());
+
+  function loadWeek() {
+    Promise.all([listRosterShifts(week, weekEnd), listApprovedLeave(week, weekEnd)])
+      .then(([s, l]) => {
+        setShifts(s);
+        setLeave(l);
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load the roster.")));
+  }
+
+  useEffect(() => {
+    Promise.all([listEmployees(), listWorkSchedules(), listTeams()])
+      .then(([e, t, tm]) => {
+        setEmployees(e.filter((x) => x.active && x.role !== "kiosk"));
+        setTemplates(t);
+        setTeams(tm);
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load employees.")));
+  }, []);
+
+  useEffect(() => {
+    loadWeek();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [week]);
+
+  const visible = (employees ?? []).filter((e) => (!teamFilter || e.teamId === teamFilter) && matchesSearch(search, e.fullName, e.teamName));
+  const visibleIds = visible.map((e) => e.id);
+  const shiftAt = new Map(shifts.map((s) => [`${s.employeeId}|${s.shiftDate}`, s]));
+  const templateById = new Map(templates.map((t) => [t.id, t]));
+  const drafts = shifts.filter((s) => s.status === "draft").length;
+
+  function onLeave(employeeId: string, date: string) {
+    return leave.find((l) => l.employeeId === employeeId && l.startsOn <= date && l.endsOn >= date) ?? null;
+  }
+
+  async function run(label: string, fn: () => Promise<string>) {
+    setBusy(label);
+    try {
+      setNotice(await fn());
+      loadWeek();
+    } catch (err) {
+      setNotice(errorMessage(err, "Something went wrong."));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function handleFill() {
+    run("fill", async () => {
+      const n = await fillRoster(week, weekEnd, visibleIds);
+      return n ? `Added ${n} draft shift${n === 1 ? "" : "s"} from templates and rotations.` : "No empty days to fill — everyone shown already has shifts or a day off.";
+    });
+  }
+
+  function handleCopy() {
+    run("copy", async () => {
+      const n = await copyPreviousWeek(week, visibleIds);
+      return n ? `Copied ${n} shift${n === 1 ? "" : "s"} from last week as drafts.` : "Nothing to copy — last week had no shifts for empty days.";
+    });
+  }
+
+  function handlePublish() {
+    if (!window.confirm(`Publish ${drafts} draft shift${drafts === 1 ? "" : "s"} for this week? Employees will see them in the app.`)) return;
+    run("publish", async () => {
+      const n = await publishRoster(week, weekEnd);
+      return `Published ${n} shift${n === 1 ? "" : "s"}.`;
+    });
+  }
+
+  function handleClear() {
+    if (!window.confirm(`Delete all ${drafts} unpublished (draft) shifts this week? Published shifts are kept.`)) return;
+    run("clear", async () => {
+      const n = await clearDrafts(week, weekEnd);
+      return `Removed ${n} draft shift${n === 1 ? "" : "s"}.`;
+    });
+  }
+
+  function handleExport() {
+    downloadCsv(
+      `roster-${week}.csv`,
+      ["Employee", "Team", ...days.map((d) => `${weekdayOptions[days.indexOf(d)][1]} ${d}`), "Paid hours"],
+      visible.map((e) => {
+        let total = 0;
+        const cells = days.map((d) => {
+          const s = shiftAt.get(`${e.id}|${d}`);
+          if (s) {
+            total += shiftHours(s);
+            return `${formatShiftTime(s)}${s.status === "draft" ? " (draft)" : ""}`;
+          }
+          const l = onLeave(e.id, d);
+          return l ? `Leave (${l.leaveType})` : "";
+        });
+        return [e.fullName, e.teamName ?? "", ...cells, Math.round(total * 100) / 100];
+      }),
+    );
+  }
+
+  return (
+    <>
+      <div className="roster-toolbar">
+        <div className="week-nav">
+          <button className="icon-action" onClick={() => setWeek(addDays(week, -7))} aria-label="Previous week"><Icon name="arrowLeft" size={15} /></button>
+          <b>{formatDate(week)} – {formatDate(weekEnd)} {weekEnd.slice(0, 4)}</b>
+          <button className="icon-action" onClick={() => setWeek(addDays(week, 7))} aria-label="Next week"><Icon name="chevronRight" size={15} /></button>
+          <button className="outline-button" onClick={() => setWeek(weekStart(today))}>This week</button>
+        </div>
+        <div className="search-input">
+          <Icon name="search" size={15} />
+          <input type="search" placeholder="Search employee" aria-label="Search employee" value={search} onChange={(e) => setSearch(e.target.value)} />
+        </div>
+        <select className="team-select" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} aria-label="Filter by team">
+          <option value="">All teams</option>
+          {teams.map((t) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+      </div>
+      <div className="roster-actions">
+        <button className="outline-button" onClick={handleFill} disabled={busy !== null || visibleIds.length === 0}>
+          <Icon name="plus" size={15} /> {busy === "fill" ? "Filling…" : "Fill week"}
+        </button>
+        <button className="outline-button" onClick={handleCopy} disabled={busy !== null || visibleIds.length === 0}>
+          <Icon name="swap" size={15} /> {busy === "copy" ? "Copying…" : "Copy last week"}
+        </button>
+        <button className="outline-button" onClick={handleExport} disabled={visible.length === 0}>
+          <Icon name="download" size={15} /> Export
+        </button>
+        <span className="toolbar-spacer" />
+        {drafts > 0 && (
+          <button className="outline-button danger-outline" onClick={handleClear} disabled={busy !== null}>
+            Clear drafts
+          </button>
+        )}
+        <button className="primary-admin" onClick={handlePublish} disabled={busy !== null || drafts === 0}>
+          <Icon name="check" size={15} /> {busy === "publish" ? "Publishing…" : drafts > 0 ? `Publish ${drafts} draft${drafts === 1 ? "" : "s"}` : "All published"}
+        </button>
+      </div>
+      {editing && (
+        <RosterShiftModal
+          employee={editing.employee}
+          date={editing.date}
+          shift={editing.shift}
+          templates={templates}
+          onClose={() => setEditing(null)}
+          onSaved={(message) => {
+            setEditing(null);
+            setNotice(message);
+            loadWeek();
+          }}
+        />
+      )}
+      {error ? (
+        <ErrorState message={error} />
+      ) : !employees ? (
+        <LoadingPanel />
+      ) : visible.length === 0 ? (
+        <EmptyPanel icon="users" title="No one to roster" note="No active employees match these filters." />
+      ) : (
+        <section className="panel roster-panel">
+          <div className="roster-grid" role="grid" aria-label="Weekly roster">
+            <div className="roster-row roster-head" role="row">
+              <span role="columnheader">Employee</span>
+              {days.map((d, i) => (
+                <span role="columnheader" key={d} className={d === today ? "today" : ""}>
+                  {weekdayOptions[i][1]} <small>{d.slice(8)}</small>
+                </span>
+              ))}
+              <span role="columnheader">Hours</span>
+            </div>
+            {visible.map((e) => {
+              let total = 0;
+              return (
+                <div className="roster-row" role="row" key={e.id}>
+                  <span className="roster-person" role="rowheader">
+                    <b>{e.fullName}</b>
+                    <em className="asset-sub">{e.teamName ?? "No team"}</em>
+                  </span>
+                  {days.map((d) => {
+                    const s = shiftAt.get(`${e.id}|${d}`);
+                    const l = onLeave(e.id, d);
+                    if (s) total += shiftHours(s);
+                    const t = s?.scheduleId ? templateById.get(s.scheduleId) : undefined;
+                    return (
+                      <span role="gridcell" key={d} className={`roster-cell${d === today ? " today" : ""}`}>
+                        {s ? (
+                          <button
+                            className={`shift-chip${s.status === "draft" ? " draft" : ""}`}
+                            style={{ "--shift-color": t?.color ?? "#6b7280" } as React.CSSProperties}
+                            onClick={() => setEditing({ employee: e, date: d, shift: s })}
+                            title={`${t?.name ?? "Custom shift"}${s.status === "draft" ? " · draft" : ""}${s.note ? ` · ${s.note}` : ""}`}
+                          >
+                            <b>{formatShiftTime(s)}</b>
+                            <span>{t?.name ?? "Custom"}{s.status === "draft" ? " · draft" : ""}</span>
+                          </button>
+                        ) : l ? (
+                          <span className="leave-chip">{leaveTypeLabel(l.leaveType)}</span>
+                        ) : (
+                          <button className="roster-add" onClick={() => setEditing({ employee: e, date: d, shift: null })} aria-label={`Add shift for ${e.fullName} on ${d}`}>
+                            <Icon name="plus" size={14} />
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                  <span className="roster-total">{formatHours(total)}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="muted small roster-legend">
+            Dashed = draft (not visible to employees until published). Coloured bar = template. Empty days are days off.
+          </p>
+        </section>
+      )}
+    </>
+  );
+}
+
+function RosterShiftModal({
+  employee,
+  date,
+  shift,
+  templates,
+  onClose,
+  onSaved,
+}: {
+  employee: AdminEmployee;
+  date: string;
+  shift: RosterShift | null;
+  templates: AdminWorkSchedule[];
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [scheduleId, setScheduleId] = useState(shift?.scheduleId ?? "");
+  const [startsAt, setStartsAt] = useState(shift?.startsAt.slice(0, 5) ?? "09:00");
+  const [endsAt, setEndsAt] = useState(shift?.endsAt.slice(0, 5) ?? "17:00");
+  const [unpaidBreak, setUnpaidBreak] = useState(String(shift?.unpaidBreakMinutes ?? 30));
+  const [note, setNote] = useState(shift?.note ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function pickTemplate(id: string) {
+    setScheduleId(id);
+    const t = templates.find((x) => x.id === id);
+    if (t) {
+      setStartsAt(t.startsAt.slice(0, 5));
+      setEndsAt(t.endsAt.slice(0, 5));
+      setUnpaidBreak(String(t.unpaidBreakMinutes));
+    }
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    const breakMinutes = Number(unpaidBreak);
+    if (startsAt === endsAt) return setError("Start and end can't be the same time.");
+    if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
+    setError(null);
+    setSaving(true);
+    try {
+      await saveRosterShift(shift?.id ?? null, {
+        employeeId: employee.id,
+        shiftDate: date,
+        scheduleId: scheduleId || null,
+        startsAt,
+        endsAt,
+        unpaidBreakMinutes: breakMinutes,
+        note,
+      });
+      onSaved(shift ? "Shift updated." : "Draft shift added — publish the week when ready.");
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save the shift."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!shift) return;
+    if (!window.confirm(`Remove ${employee.fullName}'s shift on ${formatDate(date)}? That day becomes a day off.`)) return;
+    setSaving(true);
+    try {
+      await deleteRosterShift(shift.id);
+      onSaved("Shift removed.");
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't remove the shift."));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <div>
+            <h2>{shift ? "Edit shift" : "Add shift"}</h2>
+            <p className="muted small">
+              {employee.fullName} · {new Date(`${date}T00:00:00`).toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" })}
+              {shift && ` · ${shift.status === "draft" ? "Draft" : "Published"}`}
+            </p>
+          </div>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Template
+            <select value={scheduleId} onChange={(e) => pickTemplate(e.target.value)} disabled={saving}>
+              <option value="">Custom times</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name} ({t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)})</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Starts at
+            <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Ends at
+            <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
+            {endsAt < startsAt && <small className="field-hint">Ends the next day.</small>}
+          </label>
+          <label>
+            Unpaid break (minutes)
+            <input type="number" min={0} max={480} step={5} value={unpaidBreak} onChange={(e) => setUnpaidBreak(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Note <span className="field-optional">optional, shown to the employee</span>
+            <input value={note} onChange={(e) => setNote(e.target.value)} disabled={saving} placeholder="e.g. Loading bay 2" />
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            {shift && (
+              <button type="button" className="outline-button danger-outline" onClick={handleDelete} disabled={saving}>
+                <Icon name="trash" size={14} /> Remove
+              </button>
+            )}
+            <span className="toolbar-spacer" />
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save shift"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// -- Rotations tab --
+
+function RotationsView({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+  const [rotations, setRotations] = useState<Rotation[] | null>(null);
+  const [assignments, setAssignments] = useState<RotationAssignment[]>([]);
+  const [templates, setTemplates] = useState<AdminWorkSchedule[]>([]);
+  const [employees, setEmployees] = useState<AdminEmployee[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Rotation | "new" | null>(null);
+  const [assigning, setAssigning] = useState<Rotation | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  function load() {
+    Promise.all([listRotations(), listRotationAssignments(), listWorkSchedules(), listEmployees()])
+      .then(([r, a, t, e]) => {
+        setRotations(r);
+        setAssignments(a);
+        setTemplates(t);
+        setEmployees(e);
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load rotations.")));
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const templateById = new Map(templates.map((t) => [t.id, t]));
+  const nameById = new Map(employees.map((e) => [e.id, e.fullName]));
+  const today = toIsoDate(new Date());
+
+  async function handleDelete(r: Rotation) {
+    if (!window.confirm(`Delete the "${r.name}" rotation and all its assignments? Shifts already on the roster stay.`)) return;
+    setBusyId(r.id);
+    try {
+      await deleteRotation(r.id);
+      setNotice(`Rotation "${r.name}" deleted.`);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't delete the rotation."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleEnd(a: RotationAssignment) {
+    const last = window.prompt("Last day on this rotation (YYYY-MM-DD):", addDays(today, -1));
+    if (!last) return;
+    const iso = parseDateInput(last);
+    if (!iso || iso < a.startsOn) {
+      setNotice("Enter a valid date on or after the rotation start.");
+      return;
+    }
+    setBusyId(a.id);
+    try {
+      await endRotationAssignment(a.id, iso);
+      setNotice("Rotation end date saved.");
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't end the rotation."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRemoveAssignment(a: RotationAssignment) {
+    if (!window.confirm(`Remove ${nameById.get(a.employeeId) ?? "this person"} from the rotation? Shifts already on the roster stay.`)) return;
+    setBusyId(a.id);
+    try {
+      await deleteRotationAssignment(a.id);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't remove the assignment."));
     } finally {
       setBusyId(null);
     }
@@ -3150,37 +4087,451 @@ function Schedules({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Create shift" onAction={() => setShowModal(true)} />
-      {showModal && (
-        <CreateShiftModal
-          onClose={() => setShowModal(false)}
-          onCreated={(schedule) => {
-            setShowModal(false);
-            setNotice(`Shift template "${schedule.name}" created.`);
+      {isHrAdmin && <Toolbar action="New rotation" onAction={() => setEditing("new")} />}
+      {editing && (
+        <RotationModal
+          rotation={editing === "new" ? null : editing}
+          templates={templates}
+          onClose={() => setEditing(null)}
+          onSaved={(name) => {
+            setEditing(null);
+            setNotice(`Rotation "${name}" saved.`);
+            load();
+          }}
+        />
+      )}
+      {assigning && (
+        <AssignRotationModal
+          rotation={assigning}
+          employees={employees.filter((e) => e.active && e.role !== "kiosk")}
+          onClose={() => setAssigning(null)}
+          onSaved={(count) => {
+            setAssigning(null);
+            setNotice(`${count} ${count === 1 ? "person" : "people"} added to "${assigning.name}". Use Fill week on the Roster to create their shifts.`);
             load();
           }}
         />
       )}
       {error ? (
         <ErrorState message={error} />
-      ) : !rows ? (
+      ) : !rotations ? (
         <LoadingPanel />
-      ) : rows.length === 0 ? (
-        <EmptyPanel icon="swap" title="No schedules configured" note="Create a working-hour template to assign to employees." />
+      ) : rotations.length === 0 ? (
+        <EmptyPanel
+          icon="swap"
+          title="No rotations yet"
+          note={isHrAdmin ? "Create a repeating pattern like 4 days on / 4 off or 2 weeks days / 2 weeks nights." : "HR hasn't set up any rotations."}
+        />
+      ) : (
+        rotations.map((r) => {
+          const people = assignments.filter((a) => a.rotationId === r.id);
+          return (
+            <section className="panel" key={r.id}>
+              <div className="panel-title">
+                <div>
+                  <h2>{r.name}</h2>
+                  <p className="muted small">{r.cycleDays}-day cycle · {r.days.filter(Boolean).length} working days</p>
+                </div>
+                {isHrAdmin && (
+                  <span className="row-actions">
+                    <button className="outline-button" onClick={() => setAssigning(r)} disabled={busyId === r.id}><Icon name="userPlus" size={14} /> Assign</button>
+                    <button className="outline-button" onClick={() => setEditing(r)} disabled={busyId === r.id}><Icon name="edit" size={14} /> Edit</button>
+                    <button className="icon-action reject" onClick={() => handleDelete(r)} disabled={busyId === r.id} aria-label={`Delete ${r.name}`}><Icon name="trash" size={15} /></button>
+                  </span>
+                )}
+              </div>
+              <div className="rotation-pattern" aria-label="Cycle pattern">
+                {r.days.map((id, i) => {
+                  const t = id ? templateById.get(id) : undefined;
+                  return (
+                    <span key={i} className={t ? "on" : "off"} style={t ? ({ "--shift-color": t.color } as React.CSSProperties) : undefined} title={`Day ${i + 1}: ${t ? `${t.name} ${t.startsAt.slice(0, 5)}–${t.endsAt.slice(0, 5)}` : "Off"}`}>
+                      {i + 1}
+                    </span>
+                  );
+                })}
+              </div>
+              {people.length > 0 && (
+                <>
+                  <h3 className="form-section">On this rotation</h3>
+                  {people.map((a) => (
+                    <div className="table-row defaults-row" key={a.id}>
+                      <span>
+                        {nameById.get(a.employeeId) ?? "Unknown"}
+                        <em className="asset-sub">From {formatDate(a.startsOn)} {a.startsOn.slice(0, 4)}{a.endsOn ? ` to ${formatDate(a.endsOn)} ${a.endsOn.slice(0, 4)}` : " · ongoing"}</em>
+                      </span>
+                      {isHrAdmin && (
+                        <span className="row-actions">
+                          {!a.endsOn && <button className="outline-button" onClick={() => handleEnd(a)} disabled={busyId === a.id}>End</button>}
+                          <button className="icon-action reject" onClick={() => handleRemoveAssignment(a)} disabled={busyId === a.id} aria-label="Remove from rotation"><Icon name="trash" size={15} /></button>
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+            </section>
+          );
+        })
+      )}
+    </>
+  );
+}
+
+function RotationModal({
+  rotation,
+  templates,
+  onClose,
+  onSaved,
+}: {
+  rotation: Rotation | null;
+  templates: AdminWorkSchedule[];
+  onClose: () => void;
+  onSaved: (name: string) => void;
+}) {
+  const [name, setName] = useState(rotation?.name ?? "");
+  const [days, setDays] = useState<Array<string | null>>(rotation?.days ?? Array.from({ length: 7 }, () => null));
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function setLength(n: number) {
+    const length = Math.max(1, Math.min(56, n || 1));
+    setDays((prev) => Array.from({ length }, (_, i) => prev[i] ?? null));
+  }
+
+  // Quick fill: N days of a template then M days off, repeated across the cycle.
+  function applyPattern(on: number, off: number, templateId: string) {
+    setDays((prev) => prev.map((_, i) => (i % (on + off) < on ? templateId : null)));
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!days.some(Boolean)) return setError("Give at least one day a shift.");
+    setError(null);
+    setSaving(true);
+    try {
+      await saveRotation(rotation?.id ?? null, name, days);
+      onSaved(name.trim());
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save the rotation."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const firstTemplate = templates[0]?.id ?? "";
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>{rotation ? "Edit rotation" : "New rotation"}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Name
+            <input required value={name} onChange={(e) => setName(e.target.value)} disabled={saving} placeholder="e.g. 4 on / 4 off nights" />
+          </label>
+          <label>
+            Cycle length (days)
+            <input type="number" min={1} max={56} value={days.length} onChange={(e) => setLength(Number(e.target.value))} disabled={saving} />
+            <small className="field-hint">The pattern repeats after this many days, starting on each person&apos;s start date.</small>
+          </label>
+          {templates.length > 0 && (
+            <div className="pattern-presets">
+              <span className="muted small">Quick fill with {templates[0].name}:</span>
+              {[
+                [5, 2],
+                [4, 4],
+                [3, 3],
+                [2, 2],
+              ].map(([on, off]) => (
+                <button key={`${on}-${off}`} type="button" className="outline-button" onClick={() => applyPattern(on, off, firstTemplate)} disabled={saving}>
+                  {on} on / {off} off
+                </button>
+              ))}
+            </div>
+          )}
+          <h3 className="form-section">Days</h3>
+          <div className="rotation-days">
+            {days.map((value, i) => (
+              <label key={i}>
+                Day {i + 1}
+                <select
+                  value={value ?? ""}
+                  onChange={(e) => setDays((prev) => prev.map((d, j) => (j === i ? e.target.value || null : d)))}
+                  disabled={saving}
+                >
+                  <option value="">Day off</option>
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save rotation"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function AssignRotationModal({
+  rotation,
+  employees,
+  onClose,
+  onSaved,
+}: {
+  rotation: Rotation;
+  employees: AdminEmployee[];
+  onClose: () => void;
+  onSaved: (count: number) => void;
+}) {
+  const [selected, setSelected] = useState<string[]>([]);
+  const [startsOn, setStartsOn] = useState(() => weekStart(addDays(toIsoDate(new Date()), 7)));
+  const [endsOn, setEndsOn] = useState("");
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selected.length) return setError("Choose at least one person.");
+    if (!startsOn) return setError("Choose a start date.");
+    setError(null);
+    setSaving(true);
+    try {
+      await assignRotation(rotation.id, selected, startsOn, endsOn || null);
+      onSaved(selected.length);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't assign the rotation."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal wide" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>Assign “{rotation.name}”</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Starts on (day 1 of the cycle)
+            <DateInput required value={startsOn} onChange={setStartsOn} disabled={saving} />
+          </label>
+          <label>
+            Ends on <span className="field-optional">optional</span>
+            <DateInput value={endsOn} min={startsOn || undefined} onChange={setEndsOn} disabled={saving} />
+          </label>
+          <h3 className="form-section">People ({selected.length} selected)</h3>
+          <div className="search-input defaults-search" style={{ gridColumn: "1 / -1" }}>
+            <Icon name="search" size={15} />
+            <input type="search" placeholder="Search" aria-label="Search people" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+          <div className="choice-grid">
+            {employees
+              .filter((e) => matchesSearch(search, e.fullName, e.teamName))
+              .map((e) => (
+                <label key={e.id} className="choice-chip">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(e.id)}
+                    onChange={() => setSelected((prev) => (prev.includes(e.id) ? prev.filter((x) => x !== e.id) : [...prev, e.id]))}
+                    disabled={saving}
+                  />
+                  <span>
+                    {e.fullName}
+                    <em>{e.teamName ?? "No team"}</em>
+                  </span>
+                </label>
+              ))}
+          </div>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Assign"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// -- Rotations calendar: who the rotations put on which template, 4 weeks ahead --
+
+function RotationsCalendar() {
+  const [from, setFrom] = useState(() => weekStart(toIsoDate(new Date())));
+  const [data, setData] = useState<{ rotations: Rotation[]; assignments: RotationAssignment[]; templates: AdminWorkSchedule[]; employees: AdminEmployee[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    Promise.all([listRotations(), listRotationAssignments(), listWorkSchedules(), listEmployees()])
+      .then(([rotations, assignments, templates, employees]) => setData({ rotations, assignments, templates, employees }))
+      .catch((err) => setError(errorMessage(err, "Couldn't load rotations.")));
+  }, []);
+
+  const days = Array.from({ length: 28 }, (_, i) => addDays(from, i));
+  if (error) return <ErrorState message={error} />;
+  if (!data) return <LoadingPanel />;
+
+  const rotationById = new Map(data.rotations.map((r) => [r.id, r]));
+  const templateById = new Map(data.templates.map((t) => [t.id, t]));
+  const nameById = new Map(data.employees.map((e) => [e.id, e.fullName]));
+  const active = data.assignments.filter((a) => a.startsOn <= days[27] && (!a.endsOn || a.endsOn >= from));
+  const today = toIsoDate(new Date());
+
+  return (
+    <>
+      <div className="roster-toolbar">
+        <div className="week-nav">
+          <button className="icon-action" onClick={() => setFrom(addDays(from, -28))} aria-label="Previous 4 weeks"><Icon name="arrowLeft" size={15} /></button>
+          <b>{formatDate(from)} – {formatDate(days[27])} {days[27].slice(0, 4)}</b>
+          <button className="icon-action" onClick={() => setFrom(addDays(from, 28))} aria-label="Next 4 weeks"><Icon name="chevronRight" size={15} /></button>
+          <button className="outline-button" onClick={() => setFrom(weekStart(today))}>Today</button>
+        </div>
+      </div>
+      {active.length === 0 ? (
+        <EmptyPanel icon="calendar" title="Nobody on a rotation in this period" note="Assign people to a rotation under Shift rotations." />
+      ) : (
+        <section className="panel roster-panel">
+          <div className="rotation-calendar" style={{ "--days": days.length } as React.CSSProperties}>
+            <div className="rc-row rc-head">
+              <span>Employee</span>
+              {days.map((d) => (
+                <span key={d} className={d === today ? "today" : ""} title={d}>
+                  {weekdayOptions[(new Date(`${d}T00:00:00`).getDay() + 6) % 7][1][0]}
+                  <small>{d.slice(8)}</small>
+                </span>
+              ))}
+            </div>
+            {active.map((a) => {
+              const rotation = rotationById.get(a.rotationId);
+              if (!rotation) return null;
+              return (
+                <div className="rc-row" key={a.id}>
+                  <span className="roster-person">
+                    <b>{nameById.get(a.employeeId) ?? "Unknown"}</b>
+                    <em className="asset-sub">{rotation.name}</em>
+                  </span>
+                  {days.map((d) => {
+                    const scheduleId = rotationScheduleOn(rotation, a, d);
+                    const t = scheduleId ? templateById.get(scheduleId) : undefined;
+                    return (
+                      <span
+                        key={d}
+                        className={`rc-cell${scheduleId === undefined ? " outside" : t ? " on" : " off"}${d === today ? " today" : ""}`}
+                        style={t ? ({ "--shift-color": t.color } as React.CSSProperties) : undefined}
+                        title={`${d}: ${scheduleId === undefined ? "Not on rotation" : t ? `${t.name} ${t.startsAt.slice(0, 5)}–${t.endsAt.slice(0, 5)}` : "Day off"}`}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+          <p className="muted small roster-legend">Coloured = working (template colour), grey = day off, blank = not on the rotation. This is the plan; the Roster shows the actual shifts.</p>
+        </section>
+      )}
+    </>
+  );
+}
+
+// -- Swap requests (approval) --
+
+function swapShiftText(s: { shiftDate: string; startsAt: string; endsAt: string } | null) {
+  return s ? `${new Date(`${s.shiftDate}T00:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${s.startsAt.slice(0, 5)}–${s.endsAt.slice(0, 5)}` : "—";
+}
+
+function SwapRequestsAdmin({ setNotice, onChanged }: NoticeProps & { onChanged: (pendingApproval: number) => void }) {
+  const [rows, setRows] = useState<ShiftSwap[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"open" | "all">("open");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  function load() {
+    listShiftSwaps()
+      .then((r) => {
+        setRows(r);
+        onChanged(r.filter((x) => x.status === "pending_approval").length);
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load swap requests.")));
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function decide(row: ShiftSwap, approve: boolean) {
+    const note = window.prompt(`${approve ? "Approve" : "Reject"} this swap? Optional note for the employees:`, "");
+    if (note === null) return;
+    setBusyId(row.id);
+    try {
+      await decideShiftSwap(row.id, approve, note);
+      setNotice(approve ? "Swap approved — the roster has been updated." : "Swap rejected.");
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't decide the swap."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const visible = rows?.filter((r) => filter === "all" || r.status === "pending_approval" || r.status === "pending_colleague") ?? null;
+
+  return (
+    <>
+      <div className="type-filter">
+        <button className={filter === "open" ? "active" : ""} onClick={() => setFilter("open")}>Open</button>
+        <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>All</button>
+      </div>
+      {error ? (
+        <ErrorState message={error} />
+      ) : !visible ? (
+        <LoadingPanel />
+      ) : visible.length === 0 ? (
+        <EmptyPanel icon="swap" title="No swap requests" note="When employees ask to swap shifts in the app, they appear here once the colleague accepts." />
       ) : (
         <section className="panel">
-          <div className="panel-title"><h2>Working templates</h2></div>
-          {rows.map((row) => (
-            <div className="schedule-row" key={row.id}>
-              <b>{row.name}</b>
+          <div className="table-head cols-5">
+            <b>Requested by</b><b>Gives up</b><b>Swaps with</b><b>Status</b><b className="actions-head">Decide</b>
+          </div>
+          {visible.map((r) => (
+            <div className="table-row cols-5" key={r.id}>
               <span>
-                {row.branchName ?? "All branches"} · {row.startsAt.slice(0, 5)}–{row.endsAt.slice(0, 5)} · {formatWorkingDays(row.workingDays)}
+                <b>{r.requesterName}</b>
+                {r.message && <em className="asset-sub">“{r.message}”</em>}
               </span>
-              <span className={`pill ${row.isDefault ? "success" : ""}`}>{row.isDefault ? "Default" : "Active"}</span>
+              <span>{swapShiftText(r.requesterShift)}</span>
+              <span>
+                {r.targetName}
+                <em className="asset-sub">{r.targetShift ? `Gives back ${swapShiftText(r.targetShift)}` : "Covers the shift (nothing back)"}</em>
+              </span>
+              <span>
+                <span className={`pill ${r.status === "approved" ? "success" : r.status.startsWith("pending") ? "pending" : r.status === "rejected" ? "danger" : ""}`}>
+                  {SWAP_STATUS_LABELS[r.status]}
+                </span>
+                {r.decidedByName && <em className="asset-sub">by {r.decidedByName}{r.decisionNote ? ` — ${r.decisionNote}` : ""}</em>}
+              </span>
               <span className="row-actions">
-                <button className="icon-action" disabled={busyId === row.id} onClick={() => handleDelete(row)} aria-label={`Delete ${row.name}`}>
-                  <Icon name="trash" size={15} />
-                </button>
+                {r.status === "pending_approval" && (
+                  <>
+                    <button className="icon-action approve" disabled={busyId === r.id} onClick={() => decide(r, true)} aria-label="Approve swap" title="Approve">
+                      <Icon name="check" size={15} />
+                    </button>
+                    <button className="icon-action reject" disabled={busyId === r.id} onClick={() => decide(r, false)} aria-label="Reject swap" title="Reject">
+                      <Icon name="x" size={15} />
+                    </button>
+                  </>
+                )}
               </span>
             </div>
           ))}
@@ -3190,8 +4541,6 @@ function Schedules({ setNotice }: NoticeProps) {
   );
 }
 
-// Postgres ISO day-of-week numbering (1 = Monday) to match the working_days
-// column's default of {1,2,3,4,5}.
 const weekdayOptions: Array<[number, string]> = [
   [1, "Mon"],
   [2, "Tue"],
@@ -3209,99 +4558,6 @@ function formatWorkingDays(days: number[]) {
   return [...days].sort((a, b) => a - b).map((d) => labels.get(d) ?? d).join(", ");
 }
 
-function CreateShiftModal({ onClose, onCreated }: { onClose: () => void; onCreated: (schedule: AdminWorkSchedule) => void }) {
-  const [name, setName] = useState("");
-  const [branchName, setBranchName] = useState("");
-  const [startsAt, setStartsAt] = useState("09:00");
-  const [endsAt, setEndsAt] = useState("17:00");
-  const [workingDays, setWorkingDays] = useState<number[]>([1, 2, 3, 4, 5]);
-  const [isDefault, setIsDefault] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  function toggleDay(day: number) {
-    setWorkingDays((current) => (current.includes(day) ? current.filter((d) => d !== day) : [...current, day].sort((a, b) => a - b)));
-  }
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!workingDays.length) {
-      setError("Pick at least one working day.");
-      return;
-    }
-    setError(null);
-    setSaving(true);
-    try {
-      const schedule = await createWorkSchedule({
-        name,
-        branchName: branchName || null,
-        startsAt,
-        endsAt,
-        workingDays,
-        isDefault,
-      });
-      onCreated(schedule);
-    } catch (err) {
-      setError(errorMessage(err, "Couldn't create the shift template."));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="admin-modal-overlay" onClick={onClose}>
-      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-modal-header">
-          <h2>Create shift</h2>
-          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
-        </div>
-        <p className="muted small">A working-hour template that can be assigned to employees.</p>
-        <form className="admin-login-form" onSubmit={handleSubmit}>
-          <label>
-            Name
-            <input required value={name} onChange={(e) => setName(e.target.value)} disabled={saving} placeholder="e.g. Warehouse day shift" />
-          </label>
-          <label>
-            Branch (optional)
-            <input value={branchName} onChange={(e) => setBranchName(e.target.value)} disabled={saving} placeholder="All branches" />
-          </label>
-          <label>
-            Starts at
-            <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
-          </label>
-          <label>
-            Ends at
-            <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
-          </label>
-          <p className="muted small">Working days</p>
-          <div className="weekday-picker">
-            {weekdayOptions.map(([day, label]) => (
-              <button
-                key={day}
-                type="button"
-                className={workingDays.includes(day) ? "active" : ""}
-                onClick={() => toggleDay(day)}
-                disabled={saving}
-                aria-pressed={workingDays.includes(day)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <label className="checkbox-row">
-            <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} disabled={saving} />
-            Make this the default template
-          </label>
-          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
-          <div className="admin-modal-actions">
-            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
-            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Creating…" : "Create shift"}</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
 
 const assetCategoryLabels: Record<AssetCategory, string> = {
   laptop: "Laptop",

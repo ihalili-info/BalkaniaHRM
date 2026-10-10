@@ -393,3 +393,72 @@
 .sick-entries li { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 13px; }
 .rotate-90 { transform: rotate(90deg); transition: transform 0.15s; }
 @media (max-width: 800px) { .sick-entries { margin-left: 0; } }
+
+/* ---- Work schedules: templates, roster, rotations, swaps ---- */
+.tab-badge { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: var(--radius-pill); background: var(--brand); color: #fff; font-size: 11px; }
+
+.template-list { display: grid; gap: 14px; }
+.template-card { margin: 0; border-left: 4px solid var(--shift-color, var(--navy)); }
+.template-head { display: flex; align-items: flex-start; gap: 14px; }
+.template-head > div { flex: 1; }
+.template-head h2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 17px; }
+.template-swatch { width: 38px; height: 38px; flex-shrink: 0; border-radius: var(--radius-sm); background: var(--shift-color, var(--navy)); opacity: 0.9; }
+.template-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.template-chips .pill { gap: 5px; }
+.weekday-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.weekday-pills span { min-width: 46px; padding: 7px 0; text-align: center; border-radius: var(--radius-sm); background: var(--surface-subtle); color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.weekday-pills span.on { background: var(--navy-soft); color: var(--navy); }
+.swatch-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.swatch { width: 28px; height: 28px; padding: 0; border: 2px solid transparent; border-radius: 50%; cursor: pointer; box-shadow: inset 0 0 0 2px #fff; }
+.swatch.selected { border-color: var(--ink); }
+.defaults-row { grid-template-columns: 1fr minmax(180px, 280px) !important; }
+.defaults-row select { padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); font: inherit; font-size: 13px; }
+.defaults-search { max-width: 360px; margin: 10px 0; }
+
+.roster-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0 10px; }
+.week-nav { display: flex; align-items: center; gap: 8px; }
+.week-nav b { min-width: 170px; text-align: center; font-size: 14px; }
+.team-select { padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); font: inherit; font-size: 13.5px; }
+.roster-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.roster-panel { padding: 12px; overflow-x: auto; }
+.roster-grid { min-width: 920px; }
+.roster-row { display: grid; grid-template-columns: 190px repeat(7, minmax(100px, 1fr)) 64px; border-bottom: 1px solid var(--line); }
+.roster-row:last-child { border-bottom: 0; }
+.roster-head { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.roster-head span { padding: 10px 6px; font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); text-align: center; }
+.roster-head span:first-child { text-align: left; }
+.roster-head small { display: block; font-size: 13px; color: var(--ink); letter-spacing: 0; }
+.roster-head .today, .roster-cell.today { background: var(--brand-soft); }
+.roster-person { padding: 10px 8px; font-size: 13px; position: sticky; left: 0; background: var(--surface); }
+.roster-cell { padding: 5px; min-height: 58px; display: flex; align-items: stretch; }
+.roster-total { display: grid; place-items: center; font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+.shift-chip { flex: 1; display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; text-align: left; border: 1px solid var(--line); border-left: 4px solid var(--shift-color); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--shift-color) 8%, white); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.shift-chip b { font-size: 12.5px; }
+.shift-chip span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shift-chip.draft { border-style: dashed; border-left-style: solid; background: var(--surface); }
+.shift-chip:hover { box-shadow: var(--shadow-card); }
+.leave-chip { flex: 1; display: grid; place-items: center; border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: 11.5px; font-weight: 600; text-align: center; }
+.roster-add { flex: 1; display: grid; place-items: center; border: 1px dashed transparent; border-radius: var(--radius-sm); background: transparent; color: transparent; cursor: pointer; }
+.roster-cell:hover .roster-add, .roster-add:focus-visible { border-color: var(--line-strong); color: var(--muted); }
+.roster-legend { margin: 10px 4px 2px; }
+
+.rotation-pattern { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 12px; }
+.rotation-pattern span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; font-size: 11px; font-weight: 600; }
+.rotation-pattern .on { background: var(--shift-color); color: #fff; }
+.rotation-pattern .off { background: var(--surface-subtle); color: var(--muted); border: 1px solid var(--line); }
+.pattern-presets { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.admin-modal.wide .rotation-days { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0 12px; }
+
+.rotation-calendar { min-width: 980px; }
+.rc-row { display: grid; grid-template-columns: 190px repeat(var(--days), minmax(24px, 1fr)); align-items: center; border-bottom: 1px solid var(--line); }
+.rc-row:last-child { border-bottom: 0; }
+.rc-head span { padding: 8px 0; text-align: center; font-size: 11px; font-weight: 700; color: var(--muted); }
+.rc-head span:first-child { text-align: left; padding-left: 8px; }
+.rc-head small { display: block; color: var(--ink); font-size: 11.5px; }
+.rc-head .today { background: var(--brand-soft); border-radius: 6px; }
+.rc-cell { height: 26px; margin: 3px 1px; border-radius: 5px; }
+.rc-cell.on { background: var(--shift-color); }
+.rc-cell.off { background: var(--surface-subtle); border: 1px solid var(--line); }
+.rc-cell.today { outline: 2px solid var(--brand); outline-offset: 1px; }
+.late-flag { color: var(--warning); }
+.under-hours { color: var(--danger); font-weight: 600; }

@@ -392,3 +392,11 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
   opacity: 0;
   pointer-events: none;
 }
+
+/* Employee app: next shift card + swaps */
+.card.next-shift { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; font: inherit; color: var(--ink); cursor: pointer; border-left: 4px solid var(--brand); }
+.next-shift > span { display: flex; flex-direction: column; gap: 4px; }
+.next-shift b { font-size: 17px; }
+.swap-actions { display: flex; gap: 8px; margin-top: 8px; }
+.swap-actions .secondary-button, .swap-actions .danger-button { margin-top: 0; padding: 10px; }
+.modal select { display: block; width: 100%; margin-top: 6px; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); font: inherit; font-size: 14px; background: #fbfbfe; }

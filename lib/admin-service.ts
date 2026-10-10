@@ -1,4 +1,5 @@
 import { createSupabaseBrowserClient } from "./supabase";
+import { listRosterShifts, matchShiftsToAttendance, toIsoDate, type ShiftAttendance } from "./roster-service";
 
 function client() {
   const supabase = createSupabaseBrowserClient();
@@ -571,9 +572,11 @@ export interface AdminWorkSchedule {
   endsAt: string;
   workingDays: number[];
   isDefault: boolean;
+  color: string;
+  unpaidBreakMinutes: number;
 }
 
-const SCHEDULE_COLUMNS = "id,name,branch_name,starts_at,ends_at,working_days,is_default";
+const SCHEDULE_COLUMNS = "id,name,branch_name,starts_at,ends_at,working_days,is_default,color,unpaid_break_minutes";
 
 function mapWorkSchedule(row: {
   id: string;
@@ -583,6 +586,8 @@ function mapWorkSchedule(row: {
   ends_at: string;
   working_days: number[] | null;
   is_default: boolean;
+  color: string | null;
+  unpaid_break_minutes: number | null;
 }): AdminWorkSchedule {
   return {
     id: row.id,
@@ -592,6 +597,8 @@ function mapWorkSchedule(row: {
     endsAt: row.ends_at,
     workingDays: row.working_days ?? [],
     isDefault: row.is_default,
+    color: row.color ?? "#232b6a",
+    unpaidBreakMinutes: row.unpaid_break_minutes ?? 0,
   };
 }
 
@@ -608,6 +615,8 @@ export interface CreateWorkScheduleInput {
   endsAt: string;
   workingDays: number[];
   isDefault: boolean;
+  color?: string;
+  unpaidBreakMinutes?: number;
 }
 
 export async function createWorkSchedule(input: CreateWorkScheduleInput): Promise<AdminWorkSchedule> {
@@ -623,7 +632,30 @@ export async function createWorkSchedule(input: CreateWorkScheduleInput): Promis
       ends_at: input.endsAt,
       working_days: input.workingDays,
       is_default: input.isDefault,
+      color: input.color ?? "#232b6a",
+      unpaid_break_minutes: input.unpaidBreakMinutes ?? 0,
     })
+    .select(SCHEDULE_COLUMNS)
+    .single();
+  if (error) throw error;
+  return mapWorkSchedule(data);
+}
+
+export async function updateWorkSchedule(id: string, input: CreateWorkScheduleInput): Promise<AdminWorkSchedule> {
+  if (input.isDefault) await clearDefaultWorkSchedule(id);
+  const { data, error } = await client()
+    .from("work_schedules")
+    .update({
+      name: input.name,
+      branch_name: input.branchName || null,
+      starts_at: input.startsAt,
+      ends_at: input.endsAt,
+      working_days: input.workingDays,
+      is_default: input.isDefault,
+      color: input.color ?? "#232b6a",
+      unpaid_break_minutes: input.unpaidBreakMinutes ?? 0,
+    })
+    .eq("id", id)
     .select(SCHEDULE_COLUMNS)
     .single();
   if (error) throw error;
@@ -635,8 +667,10 @@ export async function deleteWorkSchedule(id: string): Promise<void> {
   if (error) throw error;
 }
 
-async function clearDefaultWorkSchedule(): Promise<void> {
-  const { error } = await client().from("work_schedules").update({ is_default: false }).eq("is_default", true);
+async function clearDefaultWorkSchedule(exceptId?: string): Promise<void> {
+  let query = client().from("work_schedules").update({ is_default: false }).eq("is_default", true);
+  if (exceptId) query = query.neq("id", exceptId);
+  const { error } = await query;
   if (error) throw error;
 }
 
@@ -877,13 +911,16 @@ export interface DashboardStats {
   sessions: AdminAttendanceSession[];
   notInYet: Array<{ id: string; fullName: string }>;
   onLeave: Array<{ employeeName: string; leaveType: string }>;
+  // Today's published roster matched to clock-ins (empty if the roster isn't used).
+  rosterToday: Array<ShiftAttendance & { employeeName: string }>;
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
   // attendance_sessions.work_date defaults to the database's current_date (UTC),
   // so "today" is taken in UTC here too to match it.
   const today = new Date().toISOString().slice(0, 10);
-  const [employees, sessions, pending, onLeave] = await Promise.all([
+  const localToday = toIsoDate(new Date());
+  const [employees, sessions, pending, onLeave, roster] = await Promise.all([
     listEmployees(),
     listAttendanceSessions(today),
     listPendingLeaveRequests(),
@@ -893,6 +930,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
         if (error) throw error;
         return ((data ?? []) as Array<{ employee_name: string; leave_type: string }>).map((r) => ({ employeeName: r.employee_name, leaveType: r.leave_type }));
       }),
+    // The roster is optional: before the shift_rosters migration (or for teams
+    // that don't use it) the dashboard just works without it.
+    listRosterShifts(localToday, localToday, { publishedOnly: true }).catch(() => []),
   ]);
   // Only people expected to clock in: active, and not the shared kiosk account.
   const staff = employees.filter((e) => e.active && e.role !== "kiosk");
@@ -900,12 +940,21 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const staffSessions = sessions.filter((s) => staffIds.has(s.employeeId));
   const clockedIn = new Set(staffSessions.map((s) => s.employeeId));
   const onLeaveNames = new Set(onLeave.map((l) => l.employeeName));
-  const notInYet = staff
-    .filter((e) => !clockedIn.has(e.id) && !onLeaveNames.has(e.fullName))
-    .map((e) => ({ id: e.id, fullName: e.fullName }))
-    .sort((x, y) => x.fullName.localeCompare(y.fullName));
+  const nameById = new Map(staff.map((e) => [e.id, e.fullName]));
+  const rosterToday = matchShiftsToAttendance(
+    roster.filter((s) => staffIds.has(s.employeeId)),
+    staffSessions.map((s) => ({ employeeId: s.employeeId, clockedInAt: s.clockedInAt })),
+  ).map((r) => ({ ...r, employeeName: nameById.get(r.shift.employeeId) ?? "Unknown" }));
+  // With a roster, "not in yet" means rostered and not clocked in; people with
+  // no shift today are off, not missing. Without one, it's everyone not in.
+  const notInYet = (
+    rosterToday.length > 0
+      ? rosterToday.filter((r) => r.status === "awaiting" || r.status === "upcoming" || r.status === "no_show").map((r) => ({ id: r.shift.employeeId, fullName: r.employeeName }))
+      : staff.filter((e) => !clockedIn.has(e.id) && !onLeaveNames.has(e.fullName)).map((e) => ({ id: e.id, fullName: e.fullName }))
+  ).sort((x, y) => x.fullName.localeCompare(y.fullName));
   const workingNow = staffSessions.filter((s) => s.state === "working" || s.state === "on_break" || s.state === "on_lunch").length;
-  const expected = staff.length - onLeave.length;
+  // Expected = people rostered today when a roster exists, else all staff not on leave.
+  const expected = rosterToday.length > 0 ? rosterToday.filter((r) => r.status !== "upcoming").length : staff.length - onLeave.length;
   const attendanceRate = expected > 0 ? Math.min(100, Math.round((staffSessions.length / expected) * 100)) : 0;
   return {
     totalEmployees: staff.length,
@@ -915,6 +964,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     sessions: staffSessions,
     notInYet,
     onLeave,
+    rosterToday,
   };
 }
 

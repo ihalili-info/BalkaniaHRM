@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./admin.css";
 import { Icon } from "../../components/icons";
 import { DateInput } from "../../components/date-input";
@@ -77,6 +77,8 @@ import {
   listDisciplinaryActions,
   listEmployees,
   listLeaveBalances,
+  listSickLeave,
+  currentLeaveYearStart,
   listManagers,
   listPendingLeaveRequests,
   listReviewedLeaveRequests,
@@ -2005,6 +2007,170 @@ function Timesheets({ setNotice }: NoticeProps) {
   );
 }
 
+type LeaveTypeFilterValue = "all" | "annual" | "medical" | "unpaid" | "other";
+
+const LEAVE_TYPE_FILTERS: Array<[LeaveTypeFilterValue, string]> = [
+  ["all", "All types"],
+  ["annual", "Annual"],
+  ["medical", "Sick"],
+  ["unpaid", "Unpaid"],
+  ["other", "Other"],
+];
+
+function matchesLeaveType(leaveType: string, filter: LeaveTypeFilterValue) {
+  return filter === "all" || leaveType === filter;
+}
+
+function leaveTypeFilterLabel(filter: LeaveTypeFilterValue) {
+  return filter === "all" ? "leave" : filter === "medical" ? "sick leave" : `${filter} leave`;
+}
+
+function LeaveTypeFilter({ value, onChange }: { value: LeaveTypeFilterValue; onChange: (value: LeaveTypeFilterValue) => void }) {
+  return (
+    <div className="type-filter" role="group" aria-label="Filter by leave type">
+      {LEAVE_TYPE_FILTERS.map(([key, label]) => (
+        <button key={key} className={value === key ? "active" : ""} aria-pressed={value === key} onClick={() => onChange(key)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Calendar days, inclusive -- the same count the server uses for balances.
+function leaveDays(row: { startsOn: string; endsOn: string }) {
+  return Math.round((Date.parse(`${row.endsOn}T00:00:00Z`) - Date.parse(`${row.startsOn}T00:00:00Z`)) / 86400000) + 1;
+}
+
+// Per-employee sick leave for the current leave year (1 April onward).
+// "Occasions" counts approved sick requests, each request being one absence.
+function SickLeaveReport() {
+  const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
+  const [balances, setBalances] = useState<AdminLeaveBalance[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const yearStart = currentLeaveYearStart();
+
+  useEffect(() => {
+    listSickLeave(yearStart)
+      .then(setRows)
+      .catch((err) => setError(errorMessage(err, "Couldn't load sick leave.")));
+    // Remaining sick days are a nice-to-have; the report works without them.
+    listLeaveBalances()
+      .then(setBalances)
+      .catch(() => setBalances([]));
+  }, [yearStart]);
+
+  const people = useMemo(() => {
+    const byEmployee = new Map<string, { employeeId: string; employeeName: string; entries: AdminLeaveRequest[] }>();
+    for (const row of rows ?? []) {
+      const entry = byEmployee.get(row.employeeId) ?? { employeeId: row.employeeId, employeeName: row.employeeName, entries: [] };
+      entry.entries.push(row);
+      byEmployee.set(row.employeeId, entry);
+    }
+    return [...byEmployee.values()]
+      .map((p) => {
+        const approved = p.entries.filter((e) => e.status === "approved");
+        const sickBalance = balances.find((b) => b.employeeId === p.employeeId && b.leaveType === "medical");
+        return {
+          ...p,
+          daysTaken: approved.reduce((sum, e) => sum + leaveDays(e), 0),
+          occasions: approved.length,
+          pendingDays: p.entries.filter((e) => e.status === "pending").reduce((sum, e) => sum + leaveDays(e), 0),
+          lastSickDay: approved.reduce<string | null>((latest, e) => (!latest || e.endsOn > latest ? e.endsOn : latest), null),
+          remaining: sickBalance ? sickBalance.earned - sickBalance.used : null,
+        };
+      })
+      .sort((a, b) => b.daysTaken - a.daysTaken || a.employeeName.localeCompare(b.employeeName));
+  }, [rows, balances]);
+
+  const visible = people.filter((p) => matchesSearch(search, p.employeeName));
+  const totals = {
+    days: people.reduce((sum, p) => sum + p.daysTaken, 0),
+    people: people.filter((p) => p.daysTaken > 0).length,
+    pending: (rows ?? []).filter((r) => r.status === "pending").length,
+  };
+
+  function handleExport() {
+    if (!rows || rows.length === 0) return;
+    downloadCsv(
+      `sick-leave-${yearStart.slice(0, 4)}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ["Employee", "From", "To", "Days", "Status"],
+      [...rows]
+        .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.startsOn.localeCompare(b.startsOn))
+        .map((r) => [r.employeeName, r.startsOn, r.endsOn, leaveDays(r), r.status]),
+    );
+  }
+
+  return (
+    <>
+      <div className="admin-stats">
+        <Stat label="Sick days taken" value={formatLeaveDays(totals.days)} note={`Approved, since ${formatDate(yearStart)}`} />
+        <Stat label="Employees off sick" value={String(totals.people)} note="At least one sick day this leave year" />
+        <Stat label="Pending sick requests" value={String(totals.pending)} note="Awaiting a decision" />
+      </div>
+      <Toolbar
+        onExport={rows && rows.length > 0 ? handleExport : undefined}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search employee"
+      />
+      {error ? (
+        <ErrorState message={error} />
+      ) : !rows ? (
+        <LoadingPanel />
+      ) : people.length === 0 ? (
+        <EmptyPanel icon="calendar" title="No sick leave this leave year" note={`Sick days declared since ${formatDate(yearStart)} will appear here.`} />
+      ) : (
+        <section className="panel">
+          <div className="table-head cols-6">
+            <b>Employee</b><b>Days taken</b><b>Occasions</b><b>Last sick day</b><b>Sick days left</b><b className="actions-head">Details</b>
+          </div>
+          {visible.map((p) => (
+            <div key={p.employeeId} className="sick-person">
+              <div className="table-row cols-6">
+                <span className="person-cell">
+                  <i className="person-dot">{p.employeeName[0]}</i>
+                  <span className="person-name">{p.employeeName}</span>
+                </span>
+                <span>
+                  <b>{formatLeaveDays(p.daysTaken)}</b>
+                  {p.pendingDays > 0 && <em className="asset-sub">+{p.pendingDays} pending</em>}
+                </span>
+                <span>{p.occasions}</span>
+                <span>{p.lastSickDay ? formatDate(p.lastSickDay) : "—"}</span>
+                <span>{p.remaining === null ? "—" : formatLeaveDays(p.remaining)}</span>
+                <span className="row-actions">
+                  <button
+                    className="icon-action"
+                    onClick={() => setExpanded(expanded === p.employeeId ? null : p.employeeId)}
+                    aria-expanded={expanded === p.employeeId}
+                    aria-label={`${expanded === p.employeeId ? "Hide" : "Show"} ${p.employeeName}'s sick days`}
+                  >
+                    <Icon name="chevronRight" size={15} className={expanded === p.employeeId ? "rotate-90" : undefined} />
+                  </button>
+                </span>
+              </div>
+              {expanded === p.employeeId && (
+                <ul className="sick-entries">
+                  {p.entries.map((e) => (
+                    <li key={e.id}>
+                      <span>{formatDate(e.startsOn)}{e.endsOn !== e.startsOn ? ` – ${formatDate(e.endsOn)}` : ""}</span>
+                      <span className="muted small">{leaveDays(e)} day{leaveDays(e) === 1 ? "" : "s"}</span>
+                      <span className={`pill ${leaveStatusClass(e.status)}`}>{e.status}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+    </>
+  );
+}
+
 function Leaves({
   setNotice,
   isHrAdmin,
@@ -2012,7 +2178,9 @@ function Leaves({
   isTeamLead,
   currentUserId,
 }: NoticeProps & { isHrAdmin: boolean; isManager: boolean; isTeamLead: boolean; currentUserId: string }) {
-  const [view, setView] = useState<"requests" | "upcoming" | "decided" | "entitlements">("requests");
+  const [view, setView] = useState<"requests" | "upcoming" | "decided" | "sick" | "entitlements">("requests");
+  // Shared by Requests / Upcoming / Decided so it sticks when switching tabs.
+  const [typeFilter, setTypeFilter] = useState<LeaveTypeFilterValue>("all");
   const showTabs = isHrAdmin || isManager || isTeamLead;
   // Only a manager (or HR) can revisit a decision -- a team lead can't undo
   // their own call, which is what the server enforces too.
@@ -2025,19 +2193,25 @@ function Leaves({
           <button className={view === "requests" ? "active" : ""} onClick={() => setView("requests")}>Requests</button>
           <button className={view === "upcoming" ? "active" : ""} onClick={() => setView("upcoming")}>Upcoming leave</button>
           <button className={view === "decided" ? "active" : ""} onClick={() => setView("decided")}>Decided</button>
+          <button className={view === "sick" ? "active" : ""} onClick={() => setView("sick")}>Sick leave</button>
           {isHrAdmin && (
             <button className={view === "entitlements" ? "active" : ""} onClick={() => setView("entitlements")}>Entitlements</button>
           )}
         </div>
       )}
+      {(!showTabs || view === "requests" || view === "upcoming" || view === "decided") && (
+        <LeaveTypeFilter value={typeFilter} onChange={setTypeFilter} />
+      )}
       {showTabs && view === "upcoming" ? (
-        <UpcomingLeave />
+        <UpcomingLeave typeFilter={typeFilter} />
       ) : showTabs && view === "decided" ? (
-        <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} />
+        <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} typeFilter={typeFilter} />
+      ) : showTabs && view === "sick" ? (
+        <SickLeaveReport />
       ) : isHrAdmin && view === "entitlements" ? (
         <LeaveEntitlements setNotice={setNotice} />
       ) : (
-        <LeaveRequests setNotice={setNotice} isHrAdmin={isHrAdmin} currentUserId={currentUserId} />
+        <LeaveRequests setNotice={setNotice} isHrAdmin={isHrAdmin} currentUserId={currentUserId} typeFilter={typeFilter} />
       )}
     </>
   );
@@ -2047,7 +2221,8 @@ function DecidedLeave({
   setNotice,
   canOverride,
   isHrAdmin,
-}: NoticeProps & { canOverride: boolean; isHrAdmin: boolean }) {
+  typeFilter,
+}: NoticeProps & { canOverride: boolean; isHrAdmin: boolean; typeFilter: LeaveTypeFilterValue }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -2108,6 +2283,8 @@ function DecidedLeave({
     <LoadingPanel />
   ) : rows.length === 0 ? (
     <EmptyPanel icon="calendar" title="Nothing decided yet" note="Approved and rejected requests appear here." />
+  ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
+    <EmptyPanel icon="calendar" title={`No decided ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
   ) : (
     <section className="panel">
       <div className="panel-title">
@@ -2115,10 +2292,10 @@ function DecidedLeave({
         {canOverride && <span className="filter">You can reverse a decision</span>}
       </div>
       <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b>{canOverride ? "Decision" : "Status"}</b></div>
-      {rows.map((row) => (
+      {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => (
         <div className="table-row" key={row.id}>
           <span>{row.employeeName}</span>
-          <span className="capitalize">{row.leaveType}</span>
+          <span>{leaveTypeLabel(row.leaveType)}</span>
           <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
           {canOverride || isHrAdmin ? (
             <span className="row-actions">
@@ -2155,7 +2332,7 @@ function DecidedLeave({
   );
 }
 
-function UpcomingLeave() {
+function UpcomingLeave({ typeFilter }: { typeFilter: LeaveTypeFilterValue }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -2171,13 +2348,15 @@ function UpcomingLeave() {
     <LoadingPanel />
   ) : rows.length === 0 ? (
     <EmptyPanel icon="calendar" title="No upcoming leave" note="Approved and pending leave from today onward will appear here." />
+  ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
+    <EmptyPanel icon="calendar" title={`No upcoming ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
   ) : (
     <section className="panel">
       <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b>Status</b></div>
-      {rows.map((row) => (
+      {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => (
         <div className="table-row" key={row.id}>
           <span>{row.employeeName}</span>
-          <span className="capitalize">{row.leaveType}</span>
+          <span>{leaveTypeLabel(row.leaveType)}</span>
           <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
           <span className={`pill ${leaveStatusClass(row.status)}`}>{row.status}</span>
         </div>
@@ -2186,7 +2365,12 @@ function UpcomingLeave() {
   );
 }
 
-function LeaveRequests({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { isHrAdmin: boolean; currentUserId: string }) {
+function LeaveRequests({
+  setNotice,
+  isHrAdmin,
+  currentUserId,
+  typeFilter,
+}: NoticeProps & { isHrAdmin: boolean; currentUserId: string; typeFilter: LeaveTypeFilterValue }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -2279,15 +2463,17 @@ function LeaveRequests({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { 
         <LoadingPanel />
       ) : rows.length === 0 ? (
         <EmptyPanel icon="calendar" title="No pending leave requests" note="New requests will appear here for review." />
+      ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
+        <EmptyPanel icon="calendar" title={`No pending ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
       ) : (
         <section className="panel">
           <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b className="actions-head">Actions</b></div>
-          {rows.map((row) => {
+          {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => {
             const isOwnRequest = !isHrAdmin && row.employeeId === currentUserId;
             return (
               <div className="table-row" key={row.id}>
                 <span>{row.employeeName}</span>
-                <span className="capitalize">{row.leaveType}</span>
+                <span>{leaveTypeLabel(row.leaveType)}</span>
                 <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
                 {isOwnRequest ? (
                   <span className="pill pending">Awaiting HR approval</span>

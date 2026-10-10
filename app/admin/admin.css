@@ -380,3 +380,16 @@
 @media (max-width: 800px) { .attendance-list li { grid-template-columns: 1fr auto; } .attendance-list li > :last-child { grid-column: 1 / -1; } }
 .import-mode-tabs { margin: 8px 0 12px; }
 .admin-modal .admin-notice { margin: 0 0 12px; }
+
+/* Leave management: leave type filter + sick leave report */
+.type-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; }
+.type-filter button { padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.type-filter button:hover { border-color: var(--line-strong); color: var(--ink); }
+.type-filter button.active { background: var(--brand-soft); border-color: var(--brand-line); color: var(--brand-dark); }
+.sick-person { border-bottom: 1px solid var(--line); }
+.sick-person:last-child { border-bottom: 0; }
+.sick-person > .table-row { border-bottom: 0; }
+.sick-entries { list-style: none; margin: 0 0 12px 46px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--surface-subtle); }
+.sick-entries li { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 13px; }
+.rotate-90 { transform: rotate(90deg); transition: transform 0.15s; }
+@media (max-width: 800px) { .sick-entries { margin-left: 0; } }

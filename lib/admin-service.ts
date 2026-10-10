@@ -1054,3 +1054,37 @@ export async function updateEmployeeDetailsFields(
   const { error } = await client().from("employee_details").upsert({ employee_id: employeeId, ...patch }, { onConflict: "employee_id" });
   if (error) throw error;
 }
+
+// Start of the current Irish leave year (1 April), matching
+// current_leave_year_start() in the database.
+export function currentLeaveYearStart(today = new Date()): string {
+  const year = today.getMonth() >= 3 ? today.getFullYear() : today.getFullYear() - 1;
+  return `${year}-04-01`;
+}
+
+// All sick ("medical") leave touching the current leave year, any status
+// except cancelled -- for the Sick leave report. Unlike listReviewedLeaveRequests
+// this isn't capped, since totals must include every request. RLS scopes rows
+// (HR: everyone; managers/leads: their people).
+export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise<AdminLeaveRequest[]> {
+  const { data, error } = await client()
+    .from("leave_requests")
+    .select("id,employee_id,leave_type,starts_on,ends_on,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .eq("leave_type", "medical")
+    .in("status", ["pending", "approved", "rejected"])
+    .gte("ends_on", fromDate)
+    .order("starts_on", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row) => {
+    const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+    return {
+      id: row.id,
+      employeeId: row.employee_id,
+      leaveType: row.leave_type,
+      startsOn: row.starts_on,
+      endsOn: row.ends_on,
+      status: row.status,
+      employeeName: profile?.full_name ?? "Unknown",
+    };
+  });
+}

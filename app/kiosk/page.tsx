@@ -16,6 +16,7 @@ import {
   type KioskSession,
 } from "../../lib/kiosk-service";
 import type { AttendanceEventType, AttendanceState } from "../../lib/domain";
+import { playKioskError, playKioskSuccess, unlockKioskSound } from "../../lib/kiosk-sound";
 
 const eventLabels: Record<AttendanceEventType, string> = {
   clock_in: "Clock in",
@@ -77,9 +78,11 @@ export default function KioskPage() {
     if ("error" in next) {
       setSuccess(null);
       setScanMessage(next.error);
+      playKioskError();
     } else {
       setScanMessage(null);
       setSuccess({ ...next, at: new Date() });
+      playKioskSuccess(next.action);
     }
     feedbackTimerRef.current = setTimeout(() => {
       setScanMessage(null);
@@ -146,6 +149,8 @@ export default function KioskPage() {
   }
 
   function chooseAction(action: AttendanceEventType) {
+    // The tile tap is the user gesture browsers require before audio can play.
+    unlockKioskSound();
     setSelectedAction(action);
     setPhase("scanning");
   }

@@ -367,6 +367,13 @@
   .table-head.cols-7 > b:nth-child(2), .table-row.cols-7 > span:nth-child(2),
   .table-head.cols-7 > b:nth-child(n+4):nth-child(-n+6), .table-row.cols-7 > span:nth-child(n+4):nth-child(-n+6) { display: none; }
 }
+/* Rostered timesheet: the cols-7 layout plus holiday/sick days left. */
+.table-head.cols-9, .table-row.cols-9 { grid-template-columns: 1.5fr 0.8fr 0.9fr 0.9fr 0.6fr 0.8fr 0.7fr 0.9fr 0.8fr; }
+@media (max-width: 800px) {
+  .table-head.cols-9, .table-row.cols-9 { grid-template-columns: 1.4fr 0.8fr 0.8fr 0.8fr; }
+  .table-head.cols-9 > b:nth-child(n+2):nth-child(-n+3), .table-row.cols-9 > span:nth-child(n+2):nth-child(-n+3),
+  .table-head.cols-9 > b:nth-child(n+5):nth-child(-n+7), .table-row.cols-9 > span:nth-child(n+5):nth-child(-n+7) { display: none; }
+}
 
 /* Dashboard: today's attendance */
 .today-attendance { margin-top: 14px; }

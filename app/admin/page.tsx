@@ -1950,6 +1950,9 @@ function Timesheets({ setNotice }: NoticeProps) {
   // Published roster for the range; empty when the roster isn't used.
   const [roster, setRoster] = useState<RosterShift[]>([]);
   const [names, setNames] = useState<Map<string, { name: string; code: string }>>(new Map());
+  // Days left today in the current leave year, keyed by employee then leave type.
+  // Not tied to the date range: it's always the live balance.
+  const [leaveLeft, setLeaveLeft] = useState<Map<string, Map<string, number>>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -1959,10 +1962,19 @@ function Timesheets({ setNotice }: NoticeProps) {
       listTimesheet(startDate, endDate),
       listRosterShifts(startDate, endDate, { publishedOnly: true }).catch(() => [] as RosterShift[]),
       listEmployees().catch(() => [] as AdminEmployee[]),
+      // Balances are extra context; the timesheet still works without them.
+      listLeaveBalances().catch(() => [] as AdminLeaveBalance[]),
     ])
-      .then(([sheet, shifts, employees]) => {
+      .then(([sheet, shifts, employees, balances]) => {
         setRoster(shifts);
         setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode }])));
+        const left = new Map<string, Map<string, number>>();
+        for (const b of balances) {
+          const byType = left.get(b.employeeId) ?? new Map<string, number>();
+          byType.set(b.leaveType, b.earned - b.used);
+          left.set(b.employeeId, byType);
+        }
+        setLeaveLeft(left);
         setRows(sheet);
       })
       .catch((err) => setError(errorMessage(err, "Couldn't load the timesheet.")));
@@ -2034,6 +2046,14 @@ function Timesheets({ setNotice }: NoticeProps) {
   const totalBreakHours = summaries.reduce((sum, s) => sum + s.breakHours, 0);
   const totalLunchHours = summaries.reduce((sum, s) => sum + s.lunchHours, 0);
 
+  function daysLeft(employeeId: string, leaveType: "annual" | "medical"): number | null {
+    return leaveLeft.get(employeeId)?.get(leaveType) ?? null;
+  }
+  function formatDaysLeft(employeeId: string, leaveType: "annual" | "medical") {
+    const left = daysLeft(employeeId, leaveType);
+    return left === null ? "—" : formatLeaveDays(left);
+  }
+
   function handleExport() {
     if (!rows || rows.length === 0) {
       setNotice("No timesheet records to export for this range.");
@@ -2043,7 +2063,7 @@ function Timesheets({ setNotice }: NoticeProps) {
     try {
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Employee", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes"],
+        ["Employee", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
         [
           ...rows.map((row) => {
             const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
@@ -2058,6 +2078,8 @@ function Timesheets({ setNotice }: NoticeProps) {
               match?.status === "late" ? match.lateMinutes : "",
               Math.round(breakHours(row) * 60),
               Math.round(lunchHours(row) * 60),
+              daysLeft(row.employeeId, "annual") ?? "",
+              daysLeft(row.employeeId, "medical") ?? "",
             ];
           }),
           // No-shows have no attendance row of their own.
@@ -2065,7 +2087,7 @@ function Timesheets({ setNotice }: NoticeProps) {
             .filter((m) => m.status === "no_show")
             .map((m) => {
               const who = names.get(m.shift.employeeId);
-              return [who?.name ?? "Unknown", who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", ""];
+              return [who?.name ?? "Unknown", who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
             }),
         ],
       );
@@ -2117,13 +2139,13 @@ function Timesheets({ setNotice }: NoticeProps) {
           <div className="panel-title"><h2>Timesheet overview</h2><span className="filter">{formatDate(startDate)} – {formatDate(endDate)}</span></div>
           {usesRoster ? (
             <>
-              <div className="table-head cols-7">
-                <b>Employee</b><b>Days worked</b><b>Scheduled</b><b>Worked</b><b>Late</b><b>No-shows</b><b>Breaks</b>
+              <div className="table-head cols-9">
+                <b>Employee</b><b>Days worked</b><b>Scheduled</b><b>Worked</b><b>Late</b><b>No-shows</b><b>Breaks</b><b>Holiday left</b><b>Sick left</b>
               </div>
               {summaries.map((summary) => {
                 const r = rosterStats.get(summary.employeeId);
                 return (
-                  <div className="table-row cols-7" key={summary.employeeId}>
+                  <div className="table-row cols-9" key={summary.employeeId}>
                     <span>
                       {summary.employeeName}
                       <em className="asset-sub">{summary.employeeCode}</em>
@@ -2134,23 +2156,27 @@ function Timesheets({ setNotice }: NoticeProps) {
                     <span>{r?.late ? <span className="pill pending">{r.late}</span> : "0"}</span>
                     <span>{r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}</span>
                     <span>{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
+                    <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
+                    <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
                   </div>
                 );
               })}
             </>
           ) : (
             <>
-              <div className="table-head cols-6">
-                <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b>
+              <div className="table-head cols-8">
+                <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b><b>Holiday left</b><b>Sick left</b>
               </div>
               {summaries.map((summary) => (
-                <div className="table-row cols-6" key={summary.employeeId}>
+                <div className="table-row cols-8" key={summary.employeeId}>
                   <span>{summary.employeeName}</span>
                   <span>{summary.employeeCode}</span>
                   <span>{summary.days}</span>
                   <span>{summary.hours.toFixed(1)}h</span>
                   <span>{formatDurationHours(summary.breakHours)}</span>
                   <span>{formatDurationHours(summary.lunchHours)}</span>
+                  <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
+                  <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
                 </div>
               ))}
             </>

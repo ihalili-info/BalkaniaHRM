@@ -6132,6 +6132,9 @@ function Recruitment({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { is
         <button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Active</button>
         <button className={tab === "archived" ? "active" : ""} onClick={() => setTab("archived")}>Archived</button>
       </div>
+      <p className="muted small">
+        Open jobs are listed publicly on the <a href="/careers" target="_blank" rel="noreferrer">careers page</a>, where anyone can apply without signing in.
+      </p>
       {error ? (
         <ErrorState message={error} />
       ) : !visible ? (
@@ -6390,6 +6393,21 @@ function JobPipeline({
         </div>
         <div className="job-summary-side">
           <span className={`pill ${jobStatusPill[job.status]}`}>{JOB_STATUS_LABELS[job.status]}</span>
+          {/* The careers page only lists open, unarchived jobs (list_public_jobs). */}
+          {job.status === "open" && !job.archived && (
+            <button
+              className="outline-button"
+              onClick={() => {
+                const url = `${window.location.origin}/careers?job=${job.id}`;
+                navigator.clipboard
+                  .writeText(url)
+                  .then(() => setNotice("Link to the public job posting copied."))
+                  .catch(() => window.prompt("Copy the public job link:", url));
+              }}
+            >
+              <Icon name="upload" size={15} /> Copy public link
+            </button>
+          )}
           {isHrAdmin && (
             <button className="outline-button" onClick={onEdit}><Icon name="edit" size={15} /> Edit job</button>
           )}

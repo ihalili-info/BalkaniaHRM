@@ -55,6 +55,8 @@ Deno.serve(async (req) => {
   }
 
   let body: {
+    firstName?: string;
+    lastName?: string;
     fullName?: string;
     email?: string;
     employeeCode?: string;
@@ -76,7 +78,11 @@ Deno.serve(async (req) => {
     return json({ error: "Invalid request body." }, 400);
   }
 
-  const fullName = body.fullName?.trim();
+  const firstName = body.firstName?.trim() || null;
+  const lastName = body.lastName?.trim() || null;
+  // Older admin builds send only fullName; the profiles_sync_name_parts trigger
+  // splits it into first/last name in that case.
+  const fullName = firstName || lastName ? [firstName, lastName].filter(Boolean).join(" ") : body.fullName?.trim();
   const email = body.email?.trim().toLowerCase();
   // Optional -- omitted entirely from the insert below when blank so the
   // profiles_assign_employee_code trigger generates one.
@@ -87,7 +93,7 @@ Deno.serve(async (req) => {
   const selfServiceAttendance = body.selfServiceAttendance === true;
   const startDate = body.startDate?.trim() || null;
 
-  if (!fullName) return json({ error: "Full name is required." }, 400);
+  if (!fullName) return json({ error: "Name is required." }, 400);
   if (!email) return json({ error: "Email is required." }, 400);
   if (!VALID_ROLES.includes(role)) return json({ error: "Invalid role." }, 400);
 
@@ -117,6 +123,7 @@ Deno.serve(async (req) => {
     .insert({
       id: invited.user.id,
       full_name: fullName,
+      ...(firstName || lastName ? { first_name: firstName, last_name: lastName } : {}),
       employee_code: employeeCode,
       role,
       team_id: teamId,
@@ -124,7 +131,7 @@ Deno.serve(async (req) => {
       self_service_attendance: selfServiceAttendance,
       ...(startDate ? { start_date: startDate } : {}),
     })
-    .select("id,full_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,start_date")
+    .select("id,full_name,first_name,last_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,start_date")
     .single();
 
   if (profileError) {
@@ -153,6 +160,8 @@ Deno.serve(async (req) => {
   return json({
     id: profile.id,
     fullName: profile.full_name,
+    firstName: profile.first_name,
+    lastName: profile.last_name,
     employeeCode: profile.employee_code,
     role: profile.role,
     teamId: profile.team_id,

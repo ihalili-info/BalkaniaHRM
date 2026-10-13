@@ -1,3 +1,4 @@
+import { splitFullName } from "./names";
 import { createEmployee, setOpeningLeaveBalance, updateEmployeeDetailsFields, updateEmployeeProfileFields } from "./admin-service";
 
 // "create" invites new people; "update" fills in data for people already in
@@ -14,6 +15,11 @@ export interface ImportRow {
   // Update mode: the existing employee this row was matched to.
   employeeId: string | null;
   fullName: string;
+  firstName: string;
+  lastName: string;
+  // True when the file has separate Name / Surname columns, so the split is
+  // HR's own rather than guessed from the full name.
+  nameSplitInFile: boolean;
   email: string;
   teamName: string;
   teamId: string | null;
@@ -130,7 +136,13 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    const fullName = text(raw, "fullName") || [text(raw, "firstName"), text(raw, "lastName")].filter(Boolean).join(" ");
+    // A lone "Name" column often holds the whole name, so the file's split is
+    // only trusted when both cells are filled; otherwise split it ourselves.
+    const nameSplitInFile = !text(raw, "fullName") && Boolean(text(raw, "firstName") && text(raw, "lastName"));
+    const { firstName, lastName } = nameSplitInFile
+      ? { firstName: text(raw, "firstName"), lastName: text(raw, "lastName") }
+      : splitFullName(text(raw, "fullName") || [text(raw, "firstName"), text(raw, "lastName")].filter(Boolean).join(" "));
+    const fullName = [firstName, lastName].filter(Boolean).join(" ");
     const email = text(raw, "email").toLowerCase();
     const teamName = text(raw, "team");
 
@@ -177,6 +189,9 @@ export function parseEmployeeRows(sheet: unknown[][], teams: ImportTeam[], exist
       rowNumber: index + 2,
       employeeId,
       fullName,
+      firstName,
+      lastName,
+      nameSplitInFile,
       email,
       teamName,
       teamId: team?.id ?? null,
@@ -219,7 +234,8 @@ export async function importEmployees(
   for (const row of rows) {
     try {
       const employee = await createEmployee({
-        fullName: row.fullName,
+        firstName: row.firstName,
+        lastName: row.lastName,
         email: row.email,
         role: "employee",
         teamId: row.teamId,
@@ -257,6 +273,7 @@ export async function importEmployees(
 // Blank cells are skipped, so they never clear existing data.
 export function updateSummary(row: ImportRow): string[] {
   const parts: string[] = [];
+  if (row.nameSplitInFile) parts.push("name/surname");
   if (row.startDate) parts.push(`start ${row.startDate}`);
   if (row.teamId) parts.push(`team ${row.teamName}`);
   if (row.dateOfBirth) parts.push("date of birth");
@@ -289,9 +306,12 @@ export async function updateEmployeesFromFile(
       await updateEmployeeProfileFields(row.employeeId, {
         ...(row.startDate ? { start_date: row.startDate } : {}),
         ...(row.teamId ? { team_id: row.teamId } : {}),
+        // Rows are matched on the full name, so this only moves where the
+        // name/surname split falls (e.g. a middle name into the name).
+        ...(row.nameSplitInFile ? { first_name: row.firstName, last_name: row.lastName } : {}),
       });
     } catch (err) {
-      problems.push(`start date/team: ${describe(err)}`);
+      problems.push(`name/start date/team: ${describe(err)}`);
     }
     try {
       await updateEmployeeDetailsFields(row.employeeId, {

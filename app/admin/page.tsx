@@ -45,6 +45,7 @@ import { getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supa
 import { getLeaveBalances, getLeaveRequests, getMyProfile, submitLeaveRequest } from "../../lib/employee-service";
 import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../lib/domain";
 import { errorMessage } from "../../lib/errors";
+import { splitFullName } from "../../lib/names";
 import { recordAttendance } from "../../lib/attendance-service";
 import { downloadCsv } from "../../lib/csv";
 import {
@@ -705,8 +706,8 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
     try {
       downloadCsv(
         `employees-${new Date().toISOString().slice(0, 10)}.csv`,
-        ["Full name", "Employee code", "Role", "Team", "Status"],
-        rows.map((row) => [row.fullName, row.employeeCode, row.role, teamLabel(row) === "—" ? "" : teamLabel(row), row.active ? "Active" : "Former"]),
+        ["Name", "Surname", "Employee code", "Role", "Team", "Status"],
+        rows.map((row) => [row.firstName, row.lastName, row.employeeCode, row.role, teamLabel(row) === "—" ? "" : teamLabel(row), row.active ? "Active" : "Former"]),
       );
     } finally {
       setExporting(false);
@@ -1134,7 +1135,9 @@ function AddEmployeeModal({
   // Pre-fill, e.g. when hiring a candidate from Recruitment.
   initial?: { fullName?: string; email?: string; teamId?: string | null; phoneNumber?: string };
 }) {
-  const [fullName, setFullName] = useState(initial?.fullName ?? "");
+  // A candidate only has a single name, so split it as a starting point.
+  const [firstName, setFirstName] = useState(() => splitFullName(initial?.fullName ?? "").firstName);
+  const [lastName, setLastName] = useState(() => splitFullName(initial?.fullName ?? "").lastName);
   const [email, setEmail] = useState(initial?.email ?? "");
   const [role, setRole] = useState("employee");
   const [teamId, setTeamId] = useState(initial?.teamId ?? "");
@@ -1172,7 +1175,8 @@ function AddEmployeeModal({
     setSaving(true);
     try {
       const employee = await createEmployee({
-        fullName,
+        firstName,
+        lastName,
         email,
         role,
         teamId: teamId || null,
@@ -1204,8 +1208,12 @@ function AddEmployeeModal({
         <form className="admin-login-form" onSubmit={handleSubmit}>
           <h3 className="form-section">Employment</h3>
           <label>
-            Full name
-            <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
+            Name
+            <input required value={firstName} onChange={(e) => setFirstName(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Surname
+            <input required value={lastName} onChange={(e) => setLastName(e.target.value)} disabled={saving} />
           </label>
           <label>
             Work email
@@ -1295,7 +1303,8 @@ function EditEmployeeModal({
   onClose: () => void;
   onSaved: (employee: AdminEmployee) => void;
 }) {
-  const [fullName, setFullName] = useState(employee.fullName);
+  const [firstName, setFirstName] = useState(employee.firstName);
+  const [lastName, setLastName] = useState(employee.lastName);
   const [employeeCode, setEmployeeCode] = useState(employee.employeeCode);
   const [role, setRole] = useState(employee.role);
   const [teamId, setTeamId] = useState(employee.teamId ?? "");
@@ -1364,7 +1373,8 @@ function EditEmployeeModal({
       }
       const updated = await updateEmployee({
         id: employee.id,
-        fullName,
+        firstName,
+        lastName,
         employeeCode,
         role,
         teamId: teamId || null,
@@ -1391,8 +1401,12 @@ function EditEmployeeModal({
         <form className="admin-login-form" onSubmit={handleSubmit}>
           <h3 className="form-section">Employment</h3>
           <label>
-            Full name
-            <input required value={fullName} onChange={(e) => setFullName(e.target.value)} disabled={saving} />
+            Name
+            <input required value={firstName} onChange={(e) => setFirstName(e.target.value)} disabled={saving} />
+          </label>
+          <label>
+            Surname
+            <input required value={lastName} onChange={(e) => setLastName(e.target.value)} disabled={saving} />
           </label>
           <label>
             Work email
@@ -1750,17 +1764,18 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
   const working = rows?.filter((r) => r.state === "working" || r.state === "on_break" || r.state === "on_lunch").length ?? 0;
   const complete = rows?.filter((r) => r.state === "complete").length ?? 0;
 
-  function handleExport() {
+  async function handleExport() {
     if (!rows || rows.length === 0) {
       setNotice("No attendance records to export yet.");
       return;
     }
     setExporting(true);
     try {
+      const nameOf = await loadExportNames();
       downloadCsv(
         `attendance-${today}.csv`,
-        ["Employee", "Employee code", "Clock in", "Clock out", "Status"],
-        rows.map((row) => [row.employeeName, row.employeeCode, row.clockedInAt ?? "", row.clockedOutAt ?? "", row.state]),
+        ["Name", "Surname", "Employee code", "Clock in", "Clock out", "Status"],
+        rows.map((row) => [...nameOf(row.employeeId, row.employeeName), row.employeeCode, row.clockedInAt ?? "", row.clockedOutAt ?? "", row.state]),
       );
     } finally {
       setExporting(false);
@@ -2054,21 +2069,22 @@ function Timesheets({ setNotice }: NoticeProps) {
     return left === null ? "—" : formatLeaveDays(left);
   }
 
-  function handleExport() {
+  async function handleExport() {
     if (!rows || rows.length === 0) {
       setNotice("No timesheet records to export for this range.");
       return;
     }
     setExporting(true);
     try {
+      const nameOf = await loadExportNames();
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Employee", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
+        ["Name", "Surname", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
         [
           ...rows.map((row) => {
             const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
             return [
-              row.employeeName,
+              ...nameOf(row.employeeId, row.employeeName),
               row.employeeCode,
               row.workDate,
               match ? formatShiftTime(match.shift) : "",
@@ -2087,7 +2103,7 @@ function Timesheets({ setNotice }: NoticeProps) {
             .filter((m) => m.status === "no_show")
             .map((m) => {
               const who = names.get(m.shift.employeeId);
-              return [who?.name ?? "Unknown", who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
+              return [...nameOf(m.shift.employeeId, who?.name ?? "Unknown"), who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
             }),
         ],
       );
@@ -2272,14 +2288,15 @@ function SickLeaveReport() {
     pending: (rows ?? []).filter((r) => r.status === "pending").length,
   };
 
-  function handleExport() {
+  async function handleExport() {
     if (!rows || rows.length === 0) return;
+    const nameOf = await loadExportNames();
     downloadCsv(
       `sick-leave-${yearStart.slice(0, 4)}-${new Date().toISOString().slice(0, 10)}.csv`,
-      ["Employee", "From", "To", "Days", "Status"],
+      ["Name", "Surname", "From", "To", "Days", "Status"],
       [...rows]
         .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.startsOn.localeCompare(b.startsOn))
-        .map((r) => [r.employeeName, r.startsOn, r.endsOn, leaveDays(r), r.status]),
+        .map((r) => [...nameOf(r.employeeId, r.employeeName), r.startsOn, r.endsOn, leaveDays(r), r.status]),
     );
   }
 
@@ -3767,7 +3784,7 @@ function RosterView({ setNotice }: NoticeProps) {
   function handleExport() {
     downloadCsv(
       `roster-${week}.csv`,
-      ["Employee", "Team", ...days.map((d) => `${weekdayOptions[days.indexOf(d)][1]} ${d}`), "Paid hours"],
+      ["Name", "Surname", "Team", ...days.map((d) => `${weekdayOptions[days.indexOf(d)][1]} ${d}`), "Paid hours"],
       visible.map((e) => {
         let total = 0;
         const cells = days.map((d) => {
@@ -3779,7 +3796,7 @@ function RosterView({ setNotice }: NoticeProps) {
           const l = onLeave(e.id, d);
           return l ? `Leave (${l.leaveType})` : "";
         });
-        return [e.fullName, e.teamName ?? "", ...cells, Math.round(total * 100) / 100];
+        return [e.firstName, e.lastName, e.teamName ?? "", ...cells, Math.round(total * 100) / 100];
       }),
     );
   }
@@ -5198,18 +5215,19 @@ function PayrollPeriodDetail({
     }
   }
 
-  function handleExport() {
+  async function handleExport() {
     if (!rows || rows.length === 0) {
       setNotice("No payslips to export for this period.");
       return;
     }
     setExporting(true);
     try {
+      const nameOf = await loadExportNames();
       downloadCsv(
         `payroll-${period.label.replace(/\s+/g, "-").toLowerCase()}.csv`,
-        ["Employee", "Employee code", "Pay type", "Hours", "Gross pay", "Deductions", "Net pay", "Status"],
+        ["Name", "Surname", "Employee code", "Pay type", "Hours", "Gross pay", "Deductions", "Net pay", "Status"],
         rows.map((row) => [
-          row.employeeName,
+          ...nameOf(row.employeeId, row.employeeName),
           row.employeeCode,
           row.payType,
           row.hoursWorked ?? "",
@@ -6918,6 +6936,18 @@ function EmptyPanel({ icon, title, note }: { icon: Parameters<typeof Icon>[0]["n
 
 // Case-insensitive "every word appears somewhere" match across the given fields,
 // so "max ops" finds Max Murashov on the Operations team.
+// Name / Surname columns for CSV exports. Export rows only carry the display
+// name, so the stored split is looked up from the directory; anyone missing
+// from it (e.g. outside a manager's scope) falls back to splitting the name.
+async function loadExportNames(): Promise<(employeeId: string, fullName: string) => [string, string]> {
+  const employees = await listEmployees().catch(() => [] as AdminEmployee[]);
+  const byId = new Map(employees.map((e) => [e.id, e]));
+  return (employeeId, fullName) => {
+    const parts = byId.get(employeeId) ?? splitFullName(fullName);
+    return [parts.firstName, parts.lastName];
+  };
+}
+
 function matchesSearch(query: string, ...fields: Array<string | null | undefined>) {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return true;

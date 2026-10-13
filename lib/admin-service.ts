@@ -1,4 +1,5 @@
 import { createSupabaseBrowserClient } from "./supabase";
+import { joinName, splitFullName } from "./names";
 import { listRosterShifts, matchShiftsToAttendance, toIsoDate, type ShiftAttendance } from "./roster-service";
 
 function client() {
@@ -18,6 +19,8 @@ async function unwrapFunctionError(error: { name?: string; message: string; cont
 export interface AdminEmployee {
   id: string;
   fullName: string;
+  firstName: string;
+  lastName: string;
   employeeCode: string;
   role: string;
   teamId: string | null;
@@ -30,11 +33,13 @@ export interface AdminEmployee {
 }
 
 const EMPLOYEE_COLUMNS =
-  "id,full_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,active,start_date,teams!profiles_team_id_fkey(name),attendance_locations!profiles_attendance_location_id_fkey(name)";
+  "id,full_name,first_name,last_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,active,start_date,teams!profiles_team_id_fkey(name),attendance_locations!profiles_attendance_location_id_fkey(name)";
 
 function mapEmployee(row: {
   id: string;
   full_name: string;
+  first_name: string | null;
+  last_name: string | null;
   employee_code: string;
   role: string;
   team_id: string | null;
@@ -47,9 +52,12 @@ function mapEmployee(row: {
 }): AdminEmployee {
   const team = Array.isArray(row.teams) ? row.teams[0] : row.teams;
   const location = Array.isArray(row.attendance_locations) ? row.attendance_locations[0] : row.attendance_locations;
+  // Rows saved before the name/surname split have neither part yet.
+  const parts = row.first_name || row.last_name ? { firstName: row.first_name ?? "", lastName: row.last_name ?? "" } : splitFullName(row.full_name);
   return {
     id: row.id,
     fullName: row.full_name,
+    ...parts,
     employeeCode: row.employee_code,
     role: row.role,
     teamId: row.team_id,
@@ -75,7 +83,8 @@ export async function setEmployeeActive(employeeId: string, active: boolean): Pr
 }
 
 export interface CreateEmployeeInput {
-  fullName: string;
+  firstName: string;
+  lastName: string;
   email: string;
   role: string;
   teamId?: string | null;
@@ -92,7 +101,10 @@ export interface CreateEmployeeInput {
 export async function createEmployee(input: CreateEmployeeInput): Promise<AdminEmployee> {
   const { data, error } = await client().functions.invoke("create-employee", {
     body: {
-      fullName: input.fullName,
+      firstName: input.firstName.trim(),
+      lastName: input.lastName.trim(),
+      // For a create-employee function deployed before first/last names existed.
+      fullName: joinName(input.firstName, input.lastName),
       email: input.email,
       role: input.role,
       teamId: input.teamId || null,
@@ -112,6 +124,8 @@ export async function createEmployee(input: CreateEmployeeInput): Promise<AdminE
   return {
     id: data.id,
     fullName: data.fullName,
+    firstName: data.firstName ?? input.firstName.trim(),
+    lastName: data.lastName ?? input.lastName.trim(),
     employeeCode: data.employeeCode,
     role: data.role,
     teamId: data.teamId ?? null,
@@ -167,7 +181,8 @@ export async function upsertEmployeeDetails(employeeId: string, details: Employe
 
 export interface UpdateEmployeeInput {
   id: string;
-  fullName: string;
+  firstName: string;
+  lastName: string;
   employeeCode: string;
   role: string;
   teamId?: string | null;
@@ -180,7 +195,9 @@ export async function updateEmployee(input: UpdateEmployeeInput): Promise<AdminE
   const { data, error } = await client()
     .from("profiles")
     .update({
-      full_name: input.fullName,
+      first_name: input.firstName.trim(),
+      last_name: input.lastName.trim(),
+      full_name: joinName(input.firstName, input.lastName),
       employee_code: input.employeeCode,
       role: input.role,
       team_id: input.teamId || null,
@@ -1088,7 +1105,7 @@ export async function setLeaveBalance(input: {
 
 // Partial updates used by "Update existing employees" in the import dialog:
 // only the keys passed are written, so blank spreadsheet cells never wipe data.
-export async function updateEmployeeProfileFields(employeeId: string, patch: { start_date?: string; team_id?: string }): Promise<void> {
+export async function updateEmployeeProfileFields(employeeId: string, patch: { start_date?: string; team_id?: string; first_name?: string; last_name?: string }): Promise<void> {
   if (Object.keys(patch).length === 0) return;
   const { error } = await client().from("profiles").update(patch).eq("id", employeeId);
   if (error) throw error;

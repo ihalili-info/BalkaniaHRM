@@ -2240,23 +2240,35 @@ function leaveDays(row: { startsOn: string; endsOn: string }) {
 
 // Per-employee sick leave for the current leave year (1 April onward).
 // "Occasions" counts approved sick requests, each request being one absence.
-function SickLeaveReport() {
+// "Days taken" is the sick balance's "used" when there is one: approvals add to
+// it, and HR can set it directly (e.g. days taken before Balkania HRM), so it
+// can be higher than the requests listed here.
+function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [balances, setBalances] = useState<AdminLeaveBalance[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  // undefined = closed, null = "Set sick days" for a person picked in the modal.
+  const [editing, setEditing] = useState<{ employeeId: string; employeeName: string } | null | undefined>(undefined);
   const yearStart = currentLeaveYearStart();
 
-  useEffect(() => {
+  function load() {
     listSickLeave(yearStart)
       .then(setRows)
       .catch((err) => setError(errorMessage(err, "Couldn't load sick leave.")));
-    // Remaining sick days are a nice-to-have; the report works without them.
+    // Balances are a nice-to-have; the report still works from requests alone.
     listLeaveBalances()
       .then(setBalances)
       .catch(() => setBalances([]));
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [yearStart]);
+
+  const sickBalances = useMemo(() => balances.filter((b) => b.leaveType === "medical"), [balances]);
 
   const people = useMemo(() => {
     const byEmployee = new Map<string, { employeeId: string; employeeName: string; entries: AdminLeaveRequest[] }>();
@@ -2265,21 +2277,29 @@ function SickLeaveReport() {
       entry.entries.push(row);
       byEmployee.set(row.employeeId, entry);
     }
+    // People with sick days recorded on their balance but no requests in the app.
+    for (const b of sickBalances) {
+      if (b.used > 0 && !byEmployee.has(b.employeeId)) {
+        byEmployee.set(b.employeeId, { employeeId: b.employeeId, employeeName: b.employeeName, entries: [] });
+      }
+    }
     return [...byEmployee.values()]
       .map((p) => {
         const approved = p.entries.filter((e) => e.status === "approved");
-        const sickBalance = balances.find((b) => b.employeeId === p.employeeId && b.leaveType === "medical");
+        const sickBalance = sickBalances.find((b) => b.employeeId === p.employeeId) ?? null;
         return {
           ...p,
-          daysTaken: approved.reduce((sum, e) => sum + leaveDays(e), 0),
+          balance: sickBalance,
+          daysTaken: sickBalance ? sickBalance.used : approved.reduce((sum, e) => sum + leaveDays(e), 0),
           occasions: approved.length,
           pendingDays: p.entries.filter((e) => e.status === "pending").reduce((sum, e) => sum + leaveDays(e), 0),
           lastSickDay: approved.reduce<string | null>((latest, e) => (!latest || e.endsOn > latest ? e.endsOn : latest), null),
-          remaining: sickBalance ? sickBalance.earned - sickBalance.used : null,
+          // With no yearly sick allowance, "left" would just be minus the days taken.
+          remaining: sickBalance && sickBalance.entitlement > 0 ? sickBalance.earned - sickBalance.used : null,
         };
       })
       .sort((a, b) => b.daysTaken - a.daysTaken || a.employeeName.localeCompare(b.employeeName));
-  }, [rows, balances]);
+  }, [rows, sickBalances]);
 
   const visible = people.filter((p) => matchesSearch(search, p.employeeName));
   const totals = {
@@ -2308,11 +2328,25 @@ function SickLeaveReport() {
         <Stat label="Pending sick requests" value={String(totals.pending)} note="Awaiting a decision" />
       </div>
       <Toolbar
+        action={isHrAdmin ? "Set sick days" : undefined}
+        onAction={isHrAdmin ? () => setEditing(null) : undefined}
         onExport={rows && rows.length > 0 ? handleExport : undefined}
         search={search}
         onSearch={setSearch}
         searchPlaceholder="Search employee"
       />
+      {editing !== undefined && (
+        <SickDaysModal
+          person={editing}
+          balances={sickBalances}
+          onClose={() => setEditing(undefined)}
+          onSaved={(employeeName) => {
+            setEditing(undefined);
+            setNotice(`Sick days saved for ${employeeName}.`);
+            load();
+          }}
+        />
+      )}
       {error ? (
         <ErrorState message={error} />
       ) : !rows ? (
@@ -2339,17 +2373,29 @@ function SickLeaveReport() {
                 <span>{p.lastSickDay ? formatDate(p.lastSickDay) : "—"}</span>
                 <span>{p.remaining === null ? "—" : formatLeaveDays(p.remaining)}</span>
                 <span className="row-actions">
-                  <button
-                    className="icon-action"
-                    onClick={() => setExpanded(expanded === p.employeeId ? null : p.employeeId)}
-                    aria-expanded={expanded === p.employeeId}
-                    aria-label={`${expanded === p.employeeId ? "Hide" : "Show"} ${p.employeeName}'s sick days`}
-                  >
-                    <Icon name="chevronRight" size={15} className={expanded === p.employeeId ? "rotate-90" : undefined} />
-                  </button>
+                  {isHrAdmin && (
+                    <button
+                      className="icon-action"
+                      onClick={() => setEditing({ employeeId: p.employeeId, employeeName: p.employeeName })}
+                      aria-label={`Edit ${p.employeeName}'s sick days`}
+                      title="Edit sick days"
+                    >
+                      <Icon name="edit" size={15} />
+                    </button>
+                  )}
+                  {p.entries.length > 0 && (
+                    <button
+                      className="icon-action"
+                      onClick={() => setExpanded(expanded === p.employeeId ? null : p.employeeId)}
+                      aria-expanded={expanded === p.employeeId}
+                      aria-label={`${expanded === p.employeeId ? "Hide" : "Show"} ${p.employeeName}'s sick days`}
+                    >
+                      <Icon name="chevronRight" size={15} className={expanded === p.employeeId ? "rotate-90" : undefined} />
+                    </button>
+                  )}
                 </span>
               </div>
-              {expanded === p.employeeId && (
+              {expanded === p.employeeId && p.entries.length > 0 && (
                 <ul className="sick-entries">
                   {p.entries.map((e) => (
                     <li key={e.id}>
@@ -2365,6 +2411,113 @@ function SickLeaveReport() {
         </section>
       )}
     </>
+  );
+}
+
+// Sets the sick days taken this leave year (the "medical" balance's used) and,
+// optionally, a yearly sick allowance. "Remaining" isn't sent, so any imported
+// adjustment stays as it is.
+function SickDaysModal({
+  person,
+  balances,
+  onClose,
+  onSaved,
+}: {
+  // null = pick the person in the modal.
+  person: { employeeId: string; employeeName: string } | null;
+  balances: AdminLeaveBalance[];
+  onClose: () => void;
+  onSaved: (employeeName: string) => void;
+}) {
+  const [employees, setEmployees] = useState<AdminEmployee[]>([]);
+  const [employeeId, setEmployeeId] = useState(person?.employeeId ?? "");
+  const current = balances.find((b) => b.employeeId === employeeId) ?? null;
+  const [used, setUsed] = useState(current ? formatLeaveDays(current.used) : "");
+  const [entitlement, setEntitlement] = useState(current ? formatLeaveDays(current.entitlement) : "0");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (person) return;
+    listEmployees()
+      .then((data) => setEmployees(data.filter((e) => e.active)))
+      .catch(() => setEmployees([]));
+  }, [person]);
+
+  function pickEmployee(id: string) {
+    setEmployeeId(id);
+    const balance = balances.find((b) => b.employeeId === id);
+    setUsed(balance ? formatLeaveDays(balance.used) : "");
+    setEntitlement(balance ? formatLeaveDays(balance.entitlement) : "0");
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!employeeId) {
+      setError("Choose an employee.");
+      return;
+    }
+    const usedValue = Number(used);
+    if (used.trim() === "" || !Number.isFinite(usedValue) || usedValue < 0) {
+      setError("Sick days taken must be zero or more.");
+      return;
+    }
+    const entitlementValue = Number(entitlement);
+    if (entitlement.trim() === "" || !Number.isFinite(entitlementValue) || entitlementValue < 0) {
+      setError("Yearly sick allowance must be zero or more.");
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await setLeaveBalance({ employeeId, leaveType: "medical", entitlement: entitlementValue, used: usedValue, remaining: null });
+      onSaved(person?.employeeName ?? employees.find((e) => e.id === employeeId)?.fullName ?? "employee");
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't save the sick days."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>{person ? `${person.employeeName} — sick days` : "Set sick days"}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          {!person && (
+            <label>
+              Employee or manager
+              <select required value={employeeId} onChange={(e) => pickEmployee(e.target.value)} disabled={saving}>
+                <option value="">Select a person</option>
+                {employees.map((e) => (
+                  <option key={e.id} value={e.id}>{e.fullName}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label>
+            Sick days taken this leave year
+            <input type="number" min="0" step="0.5" required value={used} onChange={(e) => setUsed(e.target.value)} disabled={saving} />
+            <small className="field-hint">
+              Total since {formatDate(currentLeaveYearStart())}, including days from before Balkania HRM. Approved sick requests add to this automatically.
+            </small>
+          </label>
+          <label>
+            Yearly sick allowance (days)
+            <input type="number" min="0" step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
+            <small className="field-hint">Builds up 1/12 per month like annual leave. Employees can only declare a sick day in the app while they have sick days left.</small>
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -2404,7 +2557,7 @@ function Leaves({
       ) : showTabs && view === "decided" ? (
         <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} typeFilter={typeFilter} />
       ) : showTabs && view === "sick" ? (
-        <SickLeaveReport />
+        <SickLeaveReport setNotice={setNotice} isHrAdmin={isHrAdmin} />
       ) : isHrAdmin && view === "entitlements" ? (
         <LeaveEntitlements setNotice={setNotice} />
       ) : (
@@ -2873,7 +3026,7 @@ function SetEntitlementModal({
     setUsed(next);
     const n = Number(next);
     if (existing && canSetRemaining && next.trim() !== "" && Number.isFinite(n)) {
-      setRemaining(formatLeaveDays(Math.max(0, existing.earned - n)));
+      setRemaining(formatLeaveDays(existing.earned - n));
     }
   }
   const [error, setError] = useState<string | null>(null);
@@ -2897,13 +3050,16 @@ function SetEntitlementModal({
       return;
     }
     const remainingValue = remaining.trim() === "" ? null : Number(remaining);
-    if (remainingValue !== null && (!Number.isFinite(remainingValue) || remainingValue < 0)) {
-      setError("Remaining days must be zero or more.");
-      return;
-    }
     const usedValue = existing ? Number(used) : 0;
     if (existing && (used.trim() === "" || !Number.isFinite(usedValue) || usedValue < 0)) {
       setError("Used days must be zero or more.");
+      return;
+    }
+    // What earned - used already gives. It can be negative (someone who took
+    // more than they'd earned); leaving it untouched must still save.
+    const implied = existing ? Number(formatLeaveDays(existing.earned - usedValue)) : null;
+    if (remainingValue !== null && (!Number.isFinite(remainingValue) || (remainingValue < 0 && remainingValue !== implied))) {
+      setError("Remaining days must be zero or more.");
       return;
     }
     setError(null);
@@ -2912,7 +3068,6 @@ function SetEntitlementModal({
       if (existing) {
         // Send "remaining" only if it differs from what earned - used already
         // gives; otherwise keep the current adjustment so nothing drifts by rounding.
-        const implied = Number(formatLeaveDays(Math.max(0, existing.earned - usedValue)));
         await setLeaveBalance({
           employeeId,
           leaveType,
@@ -2986,7 +3141,7 @@ function SetEntitlementModal({
           {canSetRemaining && (
             <label>
               Remaining today (days) {!existing && <span className="field-optional">optional</span>}
-              <input type="number" min="0" step="0.01" value={remaining} onChange={(e) => setRemaining(e.target.value)} disabled={saving} />
+              <input type="number" step="0.01" value={remaining} onChange={(e) => setRemaining(e.target.value)} disabled={saving} />
               <small className="field-hint">
                 What they can still book right now, e.g. carried over from your old records. Monthly accrual continues on top of it.
               </small>

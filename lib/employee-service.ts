@@ -16,6 +16,16 @@ function client() {
   return supabase;
 }
 
+// RLS lets team leads/managers/HR also read their reports' rows, so every
+// "my data" query must filter to the signed-in user explicitly — otherwise
+// supervisors see others' rows mixed in (and .maybeSingle() errors).
+async function myId(): Promise<string> {
+  const { data } = await client().auth.getSession();
+  const id = data.session?.user.id;
+  if (!id) throw new Error("Authentication required.");
+  return id;
+}
+
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -62,6 +72,7 @@ export async function getTodaySession(): Promise<AttendanceSession | null> {
   const { data, error } = await client()
     .from("attendance_sessions")
     .select("*")
+    .eq("employee_id", await myId())
     .eq("work_date", todayIso())
     .maybeSingle();
   if (error) throw error;
@@ -83,6 +94,7 @@ export async function getTodayEvents(): Promise<AttendanceEventRecord[]> {
   const { data, error } = await client()
     .from("attendance_events")
     .select("event_type,occurred_at")
+    .eq("employee_id", await myId())
     .gte("occurred_at", `${todayIso()}T00:00:00`)
     .order("occurred_at", { ascending: false });
   if (error) throw error;
@@ -92,7 +104,10 @@ export async function getTodayEvents(): Promise<AttendanceEventRecord[]> {
 export async function getLeaveBalances(): Promise<LeaveBalance[]> {
   // leave_balances_current computes "earned" live from monthly accrual and is
   // scoped to the active Apr-Mar leave year — see 20260825_leave_year_accrual.sql.
-  const { data, error } = await client().from("leave_balances_current").select("leave_type,entitlement,earned,used");
+  const { data, error } = await client()
+    .from("leave_balances_current")
+    .select("leave_type,entitlement,earned,used")
+    .eq("employee_id", await myId());
   if (error) throw error;
   return (data ?? []).map((row) => ({ leaveType: row.leave_type, entitlement: Number(row.entitlement), earned: Number(row.earned), used: Number(row.used) }));
 }
@@ -101,6 +116,7 @@ export async function getLeaveRequests(): Promise<LeaveRequestRecord[]> {
   const { data, error } = await client()
     .from("leave_requests")
     .select("id,leave_type,starts_on,ends_on,status,note,created_at")
+    .eq("employee_id", await myId())
     .order("created_at", { ascending: false });
   if (error) throw error;
   return (data ?? []).map((row) => ({
@@ -118,6 +134,7 @@ export async function getMyDisciplinaryNotes(): Promise<DisciplinaryNote[]> {
   const { data, error } = await client()
     .from("disciplinary_actions")
     .select("id,severity,reason,details,occurred_on")
+    .eq("employee_id", await myId())
     .order("occurred_on", { ascending: false });
   if (error) throw error;
   return (data ?? []).map((row) => ({
@@ -149,6 +166,7 @@ export async function getMonthSessions(monthStart: string, monthEnd: string): Pr
   const { data, error } = await client()
     .from("attendance_sessions")
     .select("work_date,state,clocked_in_at,clocked_out_at")
+    .eq("employee_id", await myId())
     .gte("work_date", monthStart)
     .lte("work_date", monthEnd)
     .order("work_date");

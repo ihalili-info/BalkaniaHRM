@@ -47,6 +47,7 @@ import type {
   DisciplinaryNote,
   LeaveBalance,
   LeaveRequestRecord,
+  LeaveType,
   OnLeaveEntry,
   Profile,
 } from "../lib/domain";
@@ -698,7 +699,7 @@ function LeaveForm({
   onCancel: () => void;
   onSubmit: (input: Parameters<typeof submitLeaveRequest>[0]) => Promise<void>;
 }) {
-  const [kind, setKind] = useState<"annual" | "medical">("annual");
+  const [kind, setKind] = useState<LeaveType>("annual");
   const [startsOn, setStartsOn] = useState("");
   const [endsOn, setEndsOn] = useState("");
   const [note, setNote] = useState("");
@@ -728,10 +729,17 @@ function LeaveForm({
         <h2>{kind === "medical" ? "Declare sick day" : "Request time off"}</h2>
         <label>
           Type
-          <select value={kind} onChange={(e) => setKind(e.target.value as "annual" | "medical")}>
+          <select value={kind} onChange={(e) => setKind(e.target.value as LeaveType)}>
             <option value="annual">Annual leave</option>
             <option value="medical">Medical / sick day</option>
+            <option value="unpaid">Unpaid leave</option>
+            <option value="other">Other (e.g. compassionate, jury duty)</option>
           </select>
+          {(kind === "unpaid" || kind === "other") && (
+            <small className="muted">
+              {kind === "unpaid" ? "Unpaid days aren't taken from your holiday balance." : "Add a note so your manager knows what it's for."}
+            </small>
+          )}
         </label>
         <label>
           Start date

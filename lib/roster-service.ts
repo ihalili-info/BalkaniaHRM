@@ -159,20 +159,28 @@ export async function fillRoster(from: string, to: string, employeeIds: string[]
 }
 
 // Copies last week's shifts (any status) into this week as drafts, skipping
-// days that already have a shift. Done here rather than in SQL because RLS
+// days that already have a shift, a day off, leave, or a bank holiday -- the
+// same days fill_roster skips. Done here rather than in SQL because RLS
 // already limits it to the people the caller manages.
 export async function copyPreviousWeek(weekFrom: string, employeeIds: string[]): Promise<number> {
   const prevFrom = addDays(weekFrom, -7);
-  const [previous, current] = await Promise.all([
+  const weekTo = addDays(weekFrom, 6);
+  const [previous, current, daysOff, leave, holidays] = await Promise.all([
     listRosterShifts(prevFrom, addDays(prevFrom, 6)),
-    listRosterShifts(weekFrom, addDays(weekFrom, 6)),
+    listRosterShifts(weekFrom, weekTo),
+    listDaysOff(weekFrom, weekTo),
+    listRosterLeave(weekFrom, weekTo),
+    listHolidaysBetween(weekFrom, weekTo),
   ]);
   const allowed = new Set(employeeIds);
-  const taken = new Set(current.map((s) => `${s.employeeId}|${s.shiftDate}`));
+  const taken = new Set([...current.map((s) => `${s.employeeId}|${s.shiftDate}`), ...daysOff.map((d) => `${d.employeeId}|${d.date}`)]);
+  const holidayDates = new Set(holidays.map((h) => h.date));
+  const onLeave = (employeeId: string, date: string) =>
+    leave.some((l) => l.status === "approved" && l.employeeId === employeeId && l.startsOn <= date && l.endsOn >= date);
   const rows = previous
     .filter((s) => allowed.has(s.employeeId))
     .map((s) => ({ ...s, shiftDate: addDays(s.shiftDate, 7) }))
-    .filter((s) => !taken.has(`${s.employeeId}|${s.shiftDate}`))
+    .filter((s) => !taken.has(`${s.employeeId}|${s.shiftDate}`) && !holidayDates.has(s.shiftDate) && !onLeave(s.employeeId, s.shiftDate))
     .map((s) => ({
       employee_id: s.employeeId,
       shift_date: s.shiftDate,
@@ -445,16 +453,88 @@ export async function decideShiftSwap(requestId: string, approve: boolean, note:
   if (error) throw error;
 }
 
-// Approved leave overlapping a date range, so the roster can show who's off.
-export async function listApprovedLeave(from: string, to: string): Promise<Array<{ employeeId: string; startsOn: string; endsOn: string; leaveType: string }>> {
+// ---- leave, holidays and days off on the roster ----
+
+export interface RosterLeave {
+  id: string;
+  employeeId: string;
+  startsOn: string;
+  endsOn: string;
+  leaveType: string;
+  status: "approved" | "pending";
+  note: string | null;
+  // Set when a supervisor booked it from the roster rather than the employee.
+  recordedBy: string | null;
+}
+
+// Approved and pending leave overlapping a date range, so the roster can show
+// who's off -- and who has asked to be.
+export async function listRosterLeave(from: string, to: string): Promise<RosterLeave[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("employee_id,starts_on,ends_on,leave_type")
-    .eq("status", "approved")
+    .select("id,employee_id,starts_on,ends_on,leave_type,status,note,recorded_by")
+    .in("status", ["approved", "pending"])
     .lte("starts_on", to)
     .gte("ends_on", from);
   if (error) throw error;
-  return (data ?? []).map((r) => ({ employeeId: r.employee_id, startsOn: r.starts_on, endsOn: r.ends_on, leaveType: r.leave_type }));
+  return (data ?? []).map((r) => ({
+    id: r.id,
+    employeeId: r.employee_id,
+    startsOn: r.starts_on,
+    endsOn: r.ends_on,
+    leaveType: r.leave_type,
+    status: r.status,
+    note: r.note,
+    recordedBy: r.recorded_by,
+  }));
+}
+
+export async function listHolidaysBetween(from: string, to: string): Promise<Array<{ date: string; name: string }>> {
+  const { data, error } = await client().from("holidays").select("holiday_date,name").gte("holiday_date", from).lte("holiday_date", to);
+  if (error) throw error;
+  return (data ?? []).map((r) => ({ date: r.holiday_date, name: r.name }));
+}
+
+export interface DayOff {
+  id: string;
+  employeeId: string;
+  date: string;
+  note: string | null;
+}
+
+export async function listDaysOff(from: string, to: string): Promise<DayOff[]> {
+  const { data, error } = await client().from("roster_days_off").select("id,employee_id,off_date,note").gte("off_date", from).lte("off_date", to);
+  if (error) throw error;
+  return (data ?? []).map((r) => ({ id: r.id, employeeId: r.employee_id, date: r.off_date, note: r.note }));
+}
+
+// Marks a day as off so "Fill week" won't put a shift there. Replaces any
+// shift the person had that day.
+export async function setDayOff(employeeId: string, date: string, note: string, replaceShiftId: string | null): Promise<void> {
+  if (replaceShiftId) await deleteRosterShift(replaceShiftId);
+  const { error } = await client().from("roster_days_off").insert({ employee_id: employeeId, off_date: date, note: note.trim() || null });
+  if (error) {
+    if ((error as { code?: string }).code === "23505") throw new Error("That day is already marked off.");
+    throw error;
+  }
+}
+
+export async function removeDayOff(id: string): Promise<void> {
+  const { error } = await client().from("roster_days_off").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// Books approved leave for someone the caller supervises; their shifts and
+// days off in the range are removed server-side. See 20261016_roster_leave_awareness.sql.
+export async function recordLeaveForEmployee(employeeId: string, leaveType: string, startsOn: string, endsOn: string, note: string): Promise<void> {
+  const { error } = await client().rpc("record_leave_for_employee", {
+    p_employee_id: employeeId,
+    p_leave_type: leaveType,
+    p_starts_on: startsOn,
+    p_ends_on: endsOn,
+    p_note: note,
+  });
+  if (error) throw error;
 }
 
 // ---- attendance vs roster ----

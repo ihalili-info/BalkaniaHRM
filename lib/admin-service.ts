@@ -546,9 +546,23 @@ export async function setLeaveEntitlement(input: SetLeaveEntitlementInput): Prom
   if (error) throw error;
 }
 
+// PostgREST returns at most 1000 rows per request; date-range reports over a
+// month or more for the whole company exceed that, so read them page by page.
+const PAGE_SIZE = 1000;
+async function fetchAllPages<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await page(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    rows.push(...(data ?? []));
+    if (!data || data.length < PAGE_SIZE) return rows;
+  }
+}
+
 export interface AdminAttendanceSession {
   id: string;
   employeeId: string;
+  workDate: string;
   state: string;
   clockedInAt: string | null;
   clockedOutAt: string | null;
@@ -557,20 +571,27 @@ export interface AdminAttendanceSession {
   locationStatus: string | null;
 }
 
-export async function listAttendanceSessions(workDate: string): Promise<AdminAttendanceSession[]> {
-  const { data, error } = await client()
-    .from("attendance_sessions")
-    .select(
-      "id,employee_id,state,clocked_in_at,clocked_out_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
-    )
-    .eq("work_date", workDate)
-    .order("clocked_in_at");
-  if (error) throw error;
-  return (data ?? []).map((row) => {
+// One day, or an inclusive range when `toDate` is given.
+export async function listAttendanceSessions(workDate: string, toDate: string = workDate): Promise<AdminAttendanceSession[]> {
+  const data = await fetchAllPages((from, to) =>
+    client()
+      .from("attendance_sessions")
+      .select(
+        "id,employee_id,work_date,state,clocked_in_at,clocked_out_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
+      )
+      .gte("work_date", workDate)
+      .lte("work_date", toDate)
+      .order("work_date")
+      .order("clocked_in_at")
+      .order("id")
+      .range(from, to),
+  );
+  return data.map((row) => {
     const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
     return {
       id: row.id,
       employeeId: row.employee_id,
+      workDate: row.work_date,
       state: row.state,
       clockedInAt: row.clocked_in_at,
       clockedOutAt: row.clocked_out_at,
@@ -1027,16 +1048,19 @@ export interface AdminTimesheetRow {
 }
 
 export async function listTimesheet(startDate: string, endDate: string): Promise<AdminTimesheetRow[]> {
-  const { data, error } = await client()
-    .from("attendance_sessions")
-    .select(
-      "employee_id,work_date,state,clocked_in_at,clocked_out_at,first_break_started_at,first_break_ended_at,lunch_started_at,lunch_ended_at,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
-    )
-    .gte("work_date", startDate)
-    .lte("work_date", endDate)
-    .order("work_date");
-  if (error) throw error;
-  return (data ?? []).map((row) => {
+  const data = await fetchAllPages((from, to) =>
+    client()
+      .from("attendance_sessions")
+      .select(
+        "employee_id,work_date,state,clocked_in_at,clocked_out_at,first_break_started_at,first_break_ended_at,lunch_started_at,lunch_ended_at,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
+      )
+      .gte("work_date", startDate)
+      .lte("work_date", endDate)
+      .order("work_date")
+      .order("id")
+      .range(from, to),
+  );
+  return data.map((row) => {
     const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
     return {
       employeeId: row.employee_id,

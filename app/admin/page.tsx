@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import "./admin.css";
 import { Icon } from "../../components/icons";
 import { DateInput, parseDateInput } from "../../components/date-input";
@@ -20,7 +20,12 @@ import {
   formatLate,
   formatShiftTime,
   matchShiftsToAttendance,
-  listApprovedLeave,
+  listDaysOff,
+  listHolidaysBetween,
+  listRosterLeave,
+  recordLeaveForEmployee,
+  removeDayOff,
+  setDayOff,
   listRosterShifts,
   listRotationAssignments,
   listRotations,
@@ -36,6 +41,8 @@ import {
   shiftHours,
   toIsoDate,
   weekStart,
+  type DayOff,
+  type RosterLeave,
   type RosterShift,
   type Rotation,
   type RotationAssignment,
@@ -514,7 +521,7 @@ function AdminShell({ profile }: { profile: Profile }) {
           <EmptyPanel icon="chart" title="Performance Review" note="Goals, reviews, and feedback cycles are coming in a later release." />
         )}
         {module === "payroll" && <Payroll setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
-        {module === "schedules" && <WorkSchedules setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
+        {module === "schedules" && <WorkSchedules setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} isManager={isManager} currentUserId={profile.id} />}
         {module === "devices" && <Devices setNotice={setNotice} />}
         {module === "locations" && <AttendanceLocations setNotice={setNotice} />}
         {module === "assets" && <Assets setNotice={setNotice} />}
@@ -1743,45 +1750,175 @@ function EditTeamModal({
   );
 }
 
+// -- Team filter / sort shared by Attendance and Timesheets --
+
+type TeamSort = "name" | "team";
+
+const NO_TEAM = "No team";
+
+function TeamControls({
+  teams,
+  team,
+  onTeam,
+  sort,
+  onSort,
+  sortOptions = [
+    ["name", "Sort by name"],
+    ["team", "Sort by team"],
+  ],
+}: {
+  teams: AdminTeam[];
+  team: string;
+  onTeam: (teamId: string) => void;
+  sort: string;
+  onSort: (sort: string) => void;
+  sortOptions?: Array<[string, string]>;
+}) {
+  return (
+    <>
+      <select className="team-select" value={team} onChange={(e) => onTeam(e.target.value)} aria-label="Filter by team">
+        <option value="">All teams</option>
+        {teams.map((t) => (
+          <option key={t.id} value={t.id}>{t.name}</option>
+        ))}
+        <option value="none">{NO_TEAM}</option>
+      </select>
+      <select className="team-select" value={sort} onChange={(e) => onSort(e.target.value)} aria-label="Sort">
+        {sortOptions.map(([value, label]) => (
+          <option key={value} value={value}>{label}</option>
+        ))}
+      </select>
+    </>
+  );
+}
+
+function matchesTeam(filter: string, teamId: string | null | undefined) {
+  return !filter || (filter === "none" ? !teamId : teamId === filter);
+}
+
+// Team A-Z (no team last), then the given tiebreak.
+function compareTeams(a: string | null | undefined, b: string | null | undefined) {
+  return (a ?? "￿").localeCompare(b ?? "￿");
+}
+
+// When sorted by team, a header row starts each team's block.
+function TeamGroupRow({ name, count }: { name: string | null | undefined; count: number }) {
+  return (
+    <div className="team-group-row">
+      <b>{name ?? NO_TEAM}</b>
+      <span>{count}</span>
+    </div>
+  );
+}
+
+function teamCounts<T>(rows: T[], teamOf: (row: T) => string | null | undefined) {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = teamOf(row) ?? NO_TEAM;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+type AttendanceSort = "clock_in" | "name" | "team";
+
+function attendanceRangePresets(today: string): Array<[string, string, string]> {
+  const [y, m] = today.split("-").map(Number);
+  const monthStart = toIsoDate(new Date(y, m - 1, 1));
+  const lastMonthStart = toIsoDate(new Date(y, m - 2, 1));
+  const lastMonthEnd = toIsoDate(new Date(y, m - 1, 0));
+  const thisWeek = weekStart(today);
+  return [
+    ["Today", today, today],
+    ["Yesterday", addDays(today, -1), addDays(today, -1)],
+    ["This week", thisWeek, today],
+    ["Last week", addDays(thisWeek, -7), addDays(thisWeek, -1)],
+    ["This month", monthStart, today],
+    ["Last month", lastMonthStart, lastMonthEnd],
+  ];
+}
+
 function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+  const today = toIsoDate(new Date());
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
   const [rows, setRows] = useState<AdminAttendanceSession[] | null>(null);
+  const [employees, setEmployees] = useState<Map<string, AdminEmployee>>(new Map());
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [teamFilter, setTeamFilter] = useState("");
+  const [sort, setSort] = useState<AttendanceSort>("clock_in");
+  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [showRecordModal, setShowRecordModal] = useState(false);
-  const today = new Date().toISOString().slice(0, 10);
+  const singleDay = fromDate === toDate;
+  const includesToday = fromDate <= today && toDate >= today;
 
   function load() {
-    listAttendanceSessions(today)
+    setRows(null);
+    setError(null);
+    listAttendanceSessions(fromDate, toDate)
       .then(setRows)
       .catch((err) => setError(errorMessage(err, "Couldn't load attendance.")));
   }
 
   useEffect(() => {
+    Promise.all([listEmployees(), listTeams()])
+      .then(([e, t]) => {
+        setEmployees(new Map(e.map((x) => [x.id, x])));
+        setTeams(t);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [today]);
+  }, [fromDate, toDate]);
 
-  const working = rows?.filter((r) => r.state === "working" || r.state === "on_break" || r.state === "on_lunch").length ?? 0;
-  const complete = rows?.filter((r) => r.state === "complete").length ?? 0;
+  const teamOf = (row: AdminAttendanceSession) => employees.get(row.employeeId)?.teamName ?? null;
+  const visible = (rows ?? [])
+    .filter((r) => matchesTeam(teamFilter, employees.get(r.employeeId)?.teamId) && matchesSearch(search, r.employeeName, r.employeeCode))
+    .sort((a, b) => {
+      const byClockIn = a.workDate.localeCompare(b.workDate) || (a.clockedInAt ?? "").localeCompare(b.clockedInAt ?? "");
+      if (sort === "name") return a.employeeName.localeCompare(b.employeeName) || byClockIn;
+      if (sort === "team") return compareTeams(teamOf(a), teamOf(b)) || a.employeeName.localeCompare(b.employeeName) || byClockIn;
+      return byClockIn;
+    });
+  const counts = sort === "team" ? teamCounts(visible, teamOf) : null;
+
+  const working = visible.filter((r) => r.state === "working" || r.state === "on_break" || r.state === "on_lunch").length;
+  const complete = visible.filter((r) => r.state === "complete").length;
+  const people = new Set(visible.map((r) => r.employeeId)).size;
+  const rangeLabel = singleDay ? (fromDate === today ? "Today" : formatDate(fromDate)) : `${formatDate(fromDate)} – ${formatDate(toDate)}`;
 
   async function handleExport() {
-    if (!rows || rows.length === 0) {
-      setNotice("No attendance records to export yet.");
+    if (visible.length === 0) {
+      setNotice("No attendance records to export for this range.");
       return;
     }
     setExporting(true);
     try {
       const nameOf = await loadExportNames();
       downloadCsv(
-        `attendance-${today}.csv`,
-        ["Name", "Surname", "Employee code", "Clock in", "Clock out", "Status"],
-        rows.map((row) => [...nameOf(row.employeeId, row.employeeName), row.employeeCode, row.clockedInAt ?? "", row.clockedOutAt ?? "", row.state]),
+        `attendance-${fromDate}${singleDay ? "" : `-to-${toDate}`}.csv`,
+        ["Date", "Name", "Surname", "Employee code", "Team", "Clock in", "Clock out", "Status"],
+        visible.map((row) => [
+          row.workDate,
+          ...nameOf(row.employeeId, row.employeeName),
+          row.employeeCode,
+          teamOf(row) ?? "",
+          row.clockedInAt ?? "",
+          row.clockedOutAt ?? "",
+          row.state,
+        ]),
       );
     } finally {
       setExporting(false);
     }
   }
 
+  let previousTeam: string | null | undefined;
   return (
     <>
       <Toolbar
@@ -1793,6 +1930,9 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
         }
         onExport={handleExport}
         exporting={exporting}
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search employee"
       />
       {showRecordModal && (
         <RecordAttendanceModal
@@ -1804,33 +1944,92 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
           }}
         />
       )}
+      <div className="timesheet-range">
+        <label>
+          From
+          <DateInput value={fromDate} max={toDate} onChange={setFromDate} />
+        </label>
+        <label>
+          To
+          <DateInput value={toDate} min={fromDate} onChange={setToDate} />
+        </label>
+        <div className="range-presets">
+          {attendanceRangePresets(today).map(([label, from, to]) => (
+            <button
+              key={label}
+              type="button"
+              className={`outline-button${from === fromDate && to === toDate ? " active" : ""}`}
+              onClick={() => {
+                setFromDate(from);
+                setToDate(to);
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="list-controls">
+        <TeamControls
+          teams={teams}
+          team={teamFilter}
+          onTeam={setTeamFilter}
+          sort={sort}
+          onSort={(v) => setSort(v as AttendanceSort)}
+          sortOptions={[
+            ["clock_in", singleDay ? "Sort by clock-in" : "Sort by date"],
+            ["name", "Sort by name"],
+            ["team", "Sort by team"],
+          ]}
+        />
+      </div>
       <div className="admin-stats">
-        <Stat label="Currently working" value={String(working)} note="Live sessions" />
-        <Stat label="Work completed" value={String(complete)} note="Today" />
-        <Stat label="Total sessions" value={String(rows?.length ?? 0)} note="Today" />
+        {includesToday ? (
+          <Stat label="Currently working" value={String(working)} note="Live sessions" />
+        ) : (
+          <Stat label="People" value={String(people)} note="Clocked in during this period" />
+        )}
+        <Stat label="Work completed" value={String(complete)} note={rangeLabel} />
+        <Stat label="Total sessions" value={String(visible.length)} note={rangeLabel} />
       </div>
       {error ? (
         <ErrorState message={error} />
       ) : !rows ? (
         <LoadingPanel />
-      ) : rows.length === 0 ? (
-        <EmptyPanel icon="clock" title="No attendance yet today" note="Records will appear as employees clock in." />
+      ) : visible.length === 0 ? (
+        <EmptyPanel
+          icon="clock"
+          title={rows.length === 0 ? (singleDay && fromDate === today ? "No attendance yet today" : "No attendance in this period") : "No one matches these filters"}
+          note={rows.length === 0 ? "Records appear as employees clock in. Pick another date range to look back." : "Try another team or clear the search."}
+        />
       ) : (
         <section className="panel">
-          <div className="panel-title"><h2>Attendance records</h2><span className="filter">Today</span></div>
-          <div className="table-head"><b>Employee</b><b>Clock in</b><b>Clock out</b><b>Status</b></div>
-          {rows.map((row) => (
-            <div className="table-row" key={row.id}>
-              <span>{row.employeeName}</span>
-              <span>{row.clockedInAt ? formatTime(row.clockedInAt) : "--:--"}</span>
-              <span>{row.clockedOutAt ? formatTime(row.clockedOutAt) : "--:--"}</span>
-              <span className="row-actions">
-                <span className={`pill ${row.state === "complete" ? "success" : row.state === "not_started" ? "" : "pending"}`}>{stateLabel(row.state)}</span>
-                {row.locationStatus === "out_of_range" && <span className="pill danger">Off-site</span>}
-                {row.locationStatus === "unavailable" && <span className="pill pending">Unverified</span>}
-              </span>
-            </div>
-          ))}
+          <div className="panel-title"><h2>Attendance records</h2><span className="filter">{rangeLabel}</span></div>
+          <div className={`table-head ${singleDay ? "cols-5" : "cols-6"}`}>
+            <b>Employee</b>{!singleDay && <b>Date</b>}<b>Team</b><b>Clock in</b><b>Clock out</b><b>Status</b>
+          </div>
+          {visible.map((row) => {
+            const team = teamOf(row);
+            const header = counts && (previousTeam === undefined || team !== previousTeam) ? <TeamGroupRow name={team} count={counts.get(team ?? NO_TEAM) ?? 0} /> : null;
+            previousTeam = team;
+            return (
+              <Fragment key={row.id}>
+                {header}
+                <div className={`table-row ${singleDay ? "cols-5" : "cols-6"}`}>
+                  <span>{row.employeeName}</span>
+                  {!singleDay && <span>{formatDate(row.workDate)}</span>}
+                  <span className="muted">{team ?? "—"}</span>
+                  <span>{row.clockedInAt ? formatTime(row.clockedInAt) : "--:--"}</span>
+                  <span>{row.clockedOutAt ? formatTime(row.clockedOutAt) : "--:--"}</span>
+                  <span className="row-actions">
+                    <span className={`pill ${row.state === "complete" ? "success" : row.state === "not_started" ? "" : "pending"}`}>{stateLabel(row.state)}</span>
+                    {row.locationStatus === "out_of_range" && <span className="pill danger">Off-site</span>}
+                    {row.locationStatus === "unavailable" && <span className="pill pending">Unverified</span>}
+                  </span>
+                </div>
+              </Fragment>
+            );
+          })}
         </section>
       )}
     </>
@@ -1964,7 +2163,10 @@ function Timesheets({ setNotice }: NoticeProps) {
   const [rows, setRows] = useState<AdminTimesheetRow[] | null>(null);
   // Published roster for the range; empty when the roster isn't used.
   const [roster, setRoster] = useState<RosterShift[]>([]);
-  const [names, setNames] = useState<Map<string, { name: string; code: string }>>(new Map());
+  const [names, setNames] = useState<Map<string, { name: string; code: string; teamId: string | null; teamName: string | null }>>(new Map());
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [teamFilter, setTeamFilter] = useState("");
+  const [sort, setSort] = useState<TeamSort>("name");
   // Days left today in the current leave year, keyed by employee then leave type.
   // Not tied to the date range: it's always the live balance.
   const [leaveLeft, setLeaveLeft] = useState<Map<string, Map<string, number>>>(new Map());
@@ -1979,10 +2181,12 @@ function Timesheets({ setNotice }: NoticeProps) {
       listEmployees().catch(() => [] as AdminEmployee[]),
       // Balances are extra context; the timesheet still works without them.
       listLeaveBalances().catch(() => [] as AdminLeaveBalance[]),
+      listTeams().catch(() => [] as AdminTeam[]),
     ])
-      .then(([sheet, shifts, employees, balances]) => {
+      .then(([sheet, shifts, employees, balances, teamList]) => {
         setRoster(shifts);
-        setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode }])));
+        setTeams(teamList);
+        setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode, teamId: e.teamId, teamName: e.teamName }])));
         const left = new Map<string, Map<string, number>>();
         for (const b of balances) {
           const byType = left.get(b.employeeId) ?? new Map<string, number>();
@@ -2000,10 +2204,15 @@ function Timesheets({ setNotice }: NoticeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]);
 
+  const inTeam = (employeeId: string) => matchesTeam(teamFilter, names.get(employeeId)?.teamId);
+  const teamOf = (employeeId: string) => names.get(employeeId)?.teamName ?? null;
+  const sheetRows = rows?.filter((r) => inTeam(r.employeeId)) ?? null;
+  const rosterShifts = roster.filter((s) => inTeam(s.employeeId));
+
   const summaries: EmployeeTimesheetSummary[] = [];
-  if (rows) {
+  if (sheetRows) {
     const byEmployee = new Map<string, EmployeeTimesheetSummary>();
-    for (const row of rows) {
+    for (const row of sheetRows) {
       const existing = byEmployee.get(row.employeeId);
       const hours = hoursWorked(row);
       const breaks = breakHours(row);
@@ -2026,7 +2235,7 @@ function Timesheets({ setNotice }: NoticeProps) {
       }
     }
     // Rostered people who never clocked in still need a row, or no-shows vanish.
-    for (const shift of roster) {
+    for (const shift of rosterShifts) {
       if (!byEmployee.has(shift.employeeId)) {
         const who = names.get(shift.employeeId);
         byEmployee.set(shift.employeeId, {
@@ -2040,10 +2249,23 @@ function Timesheets({ setNotice }: NoticeProps) {
         });
       }
     }
-    summaries.push(...Array.from(byEmployee.values()).sort((a, b) => a.employeeName.localeCompare(b.employeeName)));
+    summaries.push(
+      ...Array.from(byEmployee.values()).sort(
+        (a, b) => (sort === "team" ? compareTeams(teamOf(a.employeeId), teamOf(b.employeeId)) : 0) || a.employeeName.localeCompare(b.employeeName),
+      ),
+    );
   }
-  const rosterMatches = rows
-    ? matchShiftsToAttendance(roster, rows.map((r) => ({ employeeId: r.employeeId, clockedInAt: r.clockedInAt })))
+  const groupCounts = sort === "team" ? teamCounts(summaries, (s) => teamOf(s.employeeId)) : null;
+  let previousTeam: string | null | undefined;
+  function groupHeader(employeeId: string) {
+    if (!groupCounts) return null;
+    const team = teamOf(employeeId);
+    const header = previousTeam === undefined || team !== previousTeam ? <TeamGroupRow name={team} count={groupCounts.get(team ?? NO_TEAM) ?? 0} /> : null;
+    previousTeam = team;
+    return header;
+  }
+  const rosterMatches = sheetRows
+    ? matchShiftsToAttendance(rosterShifts, sheetRows.map((r) => ({ employeeId: r.employeeId, clockedInAt: r.clockedInAt })))
     : [];
   const rosterStats = new Map<string, { scheduled: number; late: number; noShows: number }>();
   for (const m of rosterMatches) {
@@ -2070,7 +2292,7 @@ function Timesheets({ setNotice }: NoticeProps) {
   }
 
   async function handleExport() {
-    if (!rows || rows.length === 0) {
+    if (!sheetRows || sheetRows.length === 0) {
       setNotice("No timesheet records to export for this range.");
       return;
     }
@@ -2079,13 +2301,14 @@ function Timesheets({ setNotice }: NoticeProps) {
       const nameOf = await loadExportNames();
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Name", "Surname", "Employee code", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
+        ["Name", "Surname", "Employee code", "Team", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
         [
-          ...rows.map((row) => {
+          ...sheetRows.map((row) => {
             const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
             return [
               ...nameOf(row.employeeId, row.employeeName),
               row.employeeCode,
+              teamOf(row.employeeId) ?? "",
               row.workDate,
               match ? formatShiftTime(match.shift) : "",
               row.clockedInAt ? formatTime(row.clockedInAt) : "",
@@ -2103,7 +2326,7 @@ function Timesheets({ setNotice }: NoticeProps) {
             .filter((m) => m.status === "no_show")
             .map((m) => {
               const who = names.get(m.shift.employeeId);
-              return [...nameOf(m.shift.employeeId, who?.name ?? "Unknown"), who?.code ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
+              return [...nameOf(m.shift.employeeId, who?.name ?? "Unknown"), who?.code ?? "", teamOf(m.shift.employeeId) ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
             }),
         ],
       );
@@ -2128,6 +2351,9 @@ function Timesheets({ setNotice }: NoticeProps) {
           To
           <DateInput value={endDate} min={startDate} onChange={setEndDate} />
         </label>
+      </div>
+      <div className="list-controls">
+        <TeamControls teams={teams} team={teamFilter} onTeam={setTeamFilter} sort={sort} onSort={(v) => setSort(v as TeamSort)} />
       </div>
       <div className="admin-stats">
         <Stat label="Employees" value={String(summaries.length)} note="In range" />
@@ -2160,21 +2386,25 @@ function Timesheets({ setNotice }: NoticeProps) {
               </div>
               {summaries.map((summary) => {
                 const r = rosterStats.get(summary.employeeId);
+                const team = teamOf(summary.employeeId);
                 return (
-                  <div className="table-row cols-9" key={summary.employeeId}>
-                    <span>
-                      {summary.employeeName}
-                      <em className="asset-sub">{summary.employeeCode}</em>
-                    </span>
-                    <span>{summary.days}</span>
-                    <span>{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>
-                    <span className={r && summary.hours < r.scheduled - 0.25 ? "under-hours" : undefined}>{summary.hours.toFixed(1)}h</span>
-                    <span>{r?.late ? <span className="pill pending">{r.late}</span> : "0"}</span>
-                    <span>{r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}</span>
-                    <span>{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
-                    <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
-                    <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
-                  </div>
+                  <Fragment key={summary.employeeId}>
+                    {groupHeader(summary.employeeId)}
+                    <div className="table-row cols-9">
+                      <span>
+                        {summary.employeeName}
+                        <em className="asset-sub">{summary.employeeCode}{team ? ` · ${team}` : ""}</em>
+                      </span>
+                      <span>{summary.days}</span>
+                      <span>{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>
+                      <span className={r && summary.hours < r.scheduled - 0.25 ? "under-hours" : undefined}>{summary.hours.toFixed(1)}h</span>
+                      <span>{r?.late ? <span className="pill pending">{r.late}</span> : "0"}</span>
+                      <span>{r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}</span>
+                      <span>{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
+                      <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
+                      <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
+                    </div>
+                  </Fragment>
                 );
               })}
             </>
@@ -2184,16 +2414,22 @@ function Timesheets({ setNotice }: NoticeProps) {
                 <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b><b>Holiday left</b><b>Sick left</b>
               </div>
               {summaries.map((summary) => (
-                <div className="table-row cols-8" key={summary.employeeId}>
-                  <span>{summary.employeeName}</span>
-                  <span>{summary.employeeCode}</span>
-                  <span>{summary.days}</span>
-                  <span>{summary.hours.toFixed(1)}h</span>
-                  <span>{formatDurationHours(summary.breakHours)}</span>
-                  <span>{formatDurationHours(summary.lunchHours)}</span>
-                  <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
-                  <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
-                </div>
+                <Fragment key={summary.employeeId}>
+                  {groupHeader(summary.employeeId)}
+                  <div className="table-row cols-8">
+                    <span>
+                      {summary.employeeName}
+                      {teamOf(summary.employeeId) && <em className="asset-sub">{teamOf(summary.employeeId)}</em>}
+                    </span>
+                    <span>{summary.employeeCode}</span>
+                    <span>{summary.days}</span>
+                    <span>{summary.hours.toFixed(1)}h</span>
+                    <span>{formatDurationHours(summary.breakHours)}</span>
+                    <span>{formatDurationHours(summary.lunchHours)}</span>
+                    <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
+                    <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
+                  </div>
+                </Fragment>
               ))}
             </>
           )}
@@ -3479,7 +3715,9 @@ type ScheduleTab = "shifts" | "roster" | "rotations" | "calendar" | "swaps";
 
 const SHIFT_COLORS = ["#232b6a", "#eb1948", "#1f9d5a", "#2b6cd6", "#b0740a", "#7c3aed", "#0e7490", "#6b7280"];
 
-function WorkSchedules({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+function WorkSchedules({ setNotice, isHrAdmin, isManager, currentUserId }: NoticeProps & { isHrAdmin: boolean; isManager: boolean; currentUserId: string }) {
+  // Managers maintain shift templates too; team leads only use them.
+  const canEditTemplates = isHrAdmin || isManager;
   const [tab, setTab] = useState<ScheduleTab>(isHrAdmin ? "shifts" : "roster");
   const [pendingSwaps, setPendingSwaps] = useState(0);
 
@@ -3490,7 +3728,7 @@ function WorkSchedules({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bool
   }, [tab]);
 
   const tabs: Array<[ScheduleTab, string]> = [
-    ...(isHrAdmin ? ([["shifts", "Shifts"]] as Array<[ScheduleTab, string]>) : []),
+    ...(canEditTemplates ? ([["shifts", "Shift templates"]] as Array<[ScheduleTab, string]>) : []),
     ["roster", "Roster"],
     ["rotations", "Shift rotations"],
     ["calendar", "Rotations calendar"],
@@ -3507,8 +3745,8 @@ function WorkSchedules({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bool
           </button>
         ))}
       </div>
-      {tab === "shifts" && isHrAdmin && <ShiftTemplates setNotice={setNotice} />}
-      {tab === "roster" && <RosterView setNotice={setNotice} />}
+      {tab === "shifts" && canEditTemplates && <ShiftTemplates setNotice={setNotice} isHrAdmin={isHrAdmin} />}
+      {tab === "roster" && <RosterView setNotice={setNotice} isHrAdmin={isHrAdmin} isManager={isManager} currentUserId={currentUserId} />}
       {tab === "rotations" && <RotationsView setNotice={setNotice} isHrAdmin={isHrAdmin} />}
       {tab === "calendar" && <RotationsCalendar />}
       {tab === "swaps" && <SwapRequestsAdmin setNotice={setNotice} onChanged={(n) => setPendingSwaps(n)} />}
@@ -3526,7 +3764,9 @@ function formatHours(hours: number) {
 
 // -- Shifts tab: templates + who uses which by default --
 
-function ShiftTemplates({ setNotice }: NoticeProps) {
+// HR and managers. Only HR can pick the company default or set who uses which
+// template by default (enforced in 20261016_roster_leave_awareness.sql).
+function ShiftTemplates({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
   const [rows, setRows] = useState<AdminWorkSchedule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<AdminWorkSchedule | "new" | null>(null);
@@ -3565,6 +3805,7 @@ function ShiftTemplates({ setNotice }: NoticeProps) {
       {editing && (
         <ShiftTemplateModal
           template={editing === "new" ? null : editing}
+          canSetDefault={isHrAdmin}
           onClose={() => setEditing(null)}
           onSaved={(t) => {
             setEditing(null);
@@ -3595,9 +3836,11 @@ function ShiftTemplates({ setNotice }: NoticeProps) {
                   <button className="outline-button" onClick={() => setEditing(t)} disabled={busyId === t.id}>
                     <Icon name="edit" size={14} /> Edit
                   </button>
-                  <button className="icon-action reject" onClick={() => handleDelete(t)} disabled={busyId === t.id} aria-label={`Delete ${t.name}`}>
-                    <Icon name="trash" size={15} />
-                  </button>
+                  {(isHrAdmin || !t.isDefault) && (
+                    <button className="icon-action reject" onClick={() => handleDelete(t)} disabled={busyId === t.id} aria-label={`Delete ${t.name}`}>
+                      <Icon name="trash" size={15} />
+                    </button>
+                  )}
                 </span>
               </div>
               <div className="template-chips">
@@ -3614,17 +3857,19 @@ function ShiftTemplates({ setNotice }: NoticeProps) {
           ))}
         </div>
       )}
-      {rows && rows.length > 0 && <ScheduleDefaults templates={rows} setNotice={setNotice} />}
+      {isHrAdmin && rows && rows.length > 0 && <ScheduleDefaults templates={rows} setNotice={setNotice} />}
     </>
   );
 }
 
 function ShiftTemplateModal({
   template,
+  canSetDefault,
   onClose,
   onSaved,
 }: {
   template: AdminWorkSchedule | null;
+  canSetDefault: boolean;
   onClose: () => void;
   onSaved: (t: AdminWorkSchedule) => void;
 }) {
@@ -3721,10 +3966,12 @@ function ShiftTemplateModal({
             ))}
           </div>
           <label className="checkbox-row">
-            <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} disabled={saving} />
+            <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} disabled={saving || !canSetDefault} />
             <span>
               Company default
-              <small className="field-hint">Used for anyone without their own or a team template when filling the roster.</small>
+              <small className="field-hint">
+                Used for anyone without their own or a team template when filling the roster.{!canSetDefault && " Only HR can change this."}
+              </small>
             </span>
           </label>
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
@@ -3843,28 +4090,32 @@ function ScheduleDefaults({ templates, setNotice }: NoticeProps & { templates: A
 
 // -- Roster tab: employees x days for one week --
 
-function RosterView({ setNotice }: NoticeProps) {
+function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticeProps & { isHrAdmin: boolean; isManager: boolean; currentUserId: string }) {
   const [week, setWeek] = useState(() => weekStart(toIsoDate(new Date())));
   const [employees, setEmployees] = useState<AdminEmployee[] | null>(null);
   const [templates, setTemplates] = useState<AdminWorkSchedule[]>([]);
   const [shifts, setShifts] = useState<RosterShift[]>([]);
-  const [leave, setLeave] = useState<Array<{ employeeId: string; startsOn: string; endsOn: string; leaveType: string }>>([]);
+  const [leave, setLeave] = useState<RosterLeave[]>([]);
+  const [holidays, setHolidays] = useState<Array<{ date: string; name: string }>>([]);
+  const [daysOff, setDaysOff] = useState<DayOff[]>([]);
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [teamFilter, setTeamFilter] = useState("");
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [editing, setEditing] = useState<{ employee: AdminEmployee; date: string; shift: RosterShift | null } | null>(null);
+  const [editing, setEditing] = useState<{ employee: AdminEmployee; date: string } | null>(null);
 
   const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
   const weekEnd = days[6];
   const today = toIsoDate(new Date());
 
   function loadWeek() {
-    Promise.all([listRosterShifts(week, weekEnd), listApprovedLeave(week, weekEnd)])
-      .then(([s, l]) => {
+    Promise.all([listRosterShifts(week, weekEnd), listRosterLeave(week, weekEnd), listHolidaysBetween(week, weekEnd), listDaysOff(week, weekEnd)])
+      .then(([s, l, h, o]) => {
         setShifts(s);
         setLeave(l);
+        setHolidays(h);
+        setDaysOff(o);
       })
       .catch((err) => setError(errorMessage(err, "Couldn't load the roster.")));
   }
@@ -3884,14 +4135,20 @@ function RosterView({ setNotice }: NoticeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [week]);
 
-  const visible = (employees ?? []).filter((e) => (!teamFilter || e.teamId === teamFilter) && matchesSearch(search, e.fullName, e.teamName));
+  const visible = (employees ?? [])
+    .filter((e) => (!teamFilter || e.teamId === teamFilter) && matchesSearch(search, e.fullName, e.teamName))
+    .sort((a, b) => (a.teamName ?? "~").localeCompare(b.teamName ?? "~") || a.fullName.localeCompare(b.fullName));
   const visibleIds = visible.map((e) => e.id);
   const shiftAt = new Map(shifts.map((s) => [`${s.employeeId}|${s.shiftDate}`, s]));
+  const dayOffAt = new Map(daysOff.map((d) => [`${d.employeeId}|${d.date}`, d]));
+  const holidayOn = new Map(holidays.map((h) => [h.date, h.name]));
   const templateById = new Map(templates.map((t) => [t.id, t]));
   const drafts = shifts.filter((s) => s.status === "draft").length;
 
-  function onLeave(employeeId: string, date: string) {
-    return leave.find((l) => l.employeeId === employeeId && l.startsOn <= date && l.endsOn >= date) ?? null;
+  // Approved leave wins over a pending request on the same day.
+  function leaveOn(employeeId: string, date: string) {
+    const matches = leave.filter((l) => l.employeeId === employeeId && l.startsOn <= date && l.endsOn >= date);
+    return matches.find((l) => l.status === "approved") ?? matches[0] ?? null;
   }
 
   async function run(label: string, fn: () => Promise<string>) {
@@ -3909,7 +4166,9 @@ function RosterView({ setNotice }: NoticeProps) {
   function handleFill() {
     run("fill", async () => {
       const n = await fillRoster(week, weekEnd, visibleIds);
-      return n ? `Added ${n} draft shift${n === 1 ? "" : "s"} from templates and rotations.` : "No empty days to fill — everyone shown already has shifts or a day off.";
+      return n
+        ? `Added ${n} draft shift${n === 1 ? "" : "s"} from templates and rotations. Bank holidays, leave and days off were skipped.`
+        : "No empty days to fill — everyone shown already has shifts, leave, or a day off.";
     });
   }
 
@@ -3939,7 +4198,7 @@ function RosterView({ setNotice }: NoticeProps) {
   function handleExport() {
     downloadCsv(
       `roster-${week}.csv`,
-      ["Name", "Surname", "Team", ...days.map((d) => `${weekdayOptions[days.indexOf(d)][1]} ${d}`), "Paid hours"],
+      ["Name", "Surname", "Team", ...days.map((d, i) => `${weekdayOptions[i][1]} ${d}${holidayOn.has(d) ? ` (${holidayOn.get(d)})` : ""}`), "Paid hours"],
       visible.map((e) => {
         let total = 0;
         const cells = days.map((d) => {
@@ -3948,13 +4207,18 @@ function RosterView({ setNotice }: NoticeProps) {
             total += shiftHours(s);
             return `${formatShiftTime(s)}${s.status === "draft" ? " (draft)" : ""}`;
           }
-          const l = onLeave(e.id, d);
-          return l ? `Leave (${l.leaveType})` : "";
+          const l = leaveOn(e.id, d);
+          if (l?.status === "approved") return `Leave (${leaveTypeLabel(l.leaveType)})`;
+          if (dayOffAt.has(`${e.id}|${d}`)) return "Off";
+          if (holidayOn.has(d)) return "Bank holiday";
+          return "";
         });
         return [e.firstName, e.lastName, e.teamName ?? "", ...cells, Math.round(total * 100) / 100];
       }),
     );
   }
+
+  const editingLeave = editing ? leaveOn(editing.employee.id, editing.date) : null;
 
   return (
     <>
@@ -3997,10 +4261,14 @@ function RosterView({ setNotice }: NoticeProps) {
         </button>
       </div>
       {editing && (
-        <RosterShiftModal
+        <RosterDayModal
           employee={editing.employee}
           date={editing.date}
-          shift={editing.shift}
+          shift={shiftAt.get(`${editing.employee.id}|${editing.date}`) ?? null}
+          dayOff={dayOffAt.get(`${editing.employee.id}|${editing.date}`) ?? null}
+          leave={editingLeave}
+          holiday={holidayOn.get(editing.date) ?? null}
+          canCancelLeave={!!editingLeave && (isHrAdmin || isManager || editingLeave.recordedBy === currentUserId)}
           templates={templates}
           onClose={() => setEditing(null)}
           onSaved={(message) => {
@@ -4022,8 +4290,9 @@ function RosterView({ setNotice }: NoticeProps) {
             <div className="roster-row roster-head" role="row">
               <span role="columnheader">Employee</span>
               {days.map((d, i) => (
-                <span role="columnheader" key={d} className={d === today ? "today" : ""}>
+                <span role="columnheader" key={d} className={`${d === today ? "today" : ""}${holidayOn.has(d) ? " holiday" : ""}`} title={holidayOn.get(d)}>
                   {weekdayOptions[i][1]} <small>{d.slice(8)}</small>
+                  {holidayOn.has(d) && <em className="holiday-name">{holidayOn.get(d)}</em>}
                 </span>
               ))}
               <span role="columnheader">Hours</span>
@@ -4038,25 +4307,37 @@ function RosterView({ setNotice }: NoticeProps) {
                   </span>
                   {days.map((d) => {
                     const s = shiftAt.get(`${e.id}|${d}`);
-                    const l = onLeave(e.id, d);
+                    const l = leaveOn(e.id, d);
+                    const off = dayOffAt.get(`${e.id}|${d}`);
+                    const holiday = holidayOn.get(d);
                     if (s) total += shiftHours(s);
                     const t = s?.scheduleId ? templateById.get(s.scheduleId) : undefined;
+                    const open = () => setEditing({ employee: e, date: d });
+                    // A shift on a leave day or a bank holiday is allowed
+                    // (someone may have to cover) but flagged.
+                    const conflict = s ? (l?.status === "approved" ? `On ${leaveTypeLabel(l.leaveType).toLowerCase()} leave` : holiday ? `Bank holiday: ${holiday}` : null) : null;
                     return (
-                      <span role="gridcell" key={d} className={`roster-cell${d === today ? " today" : ""}`}>
+                      <span role="gridcell" key={d} className={`roster-cell${d === today ? " today" : ""}${holiday ? " holiday" : ""}`}>
                         {s ? (
                           <button
-                            className={`shift-chip${s.status === "draft" ? " draft" : ""}`}
+                            className={`shift-chip${s.status === "draft" ? " draft" : ""}${conflict ? " conflict" : ""}`}
                             style={{ "--shift-color": t?.color ?? "#6b7280" } as React.CSSProperties}
-                            onClick={() => setEditing({ employee: e, date: d, shift: s })}
-                            title={`${t?.name ?? "Custom shift"}${s.status === "draft" ? " · draft" : ""}${s.note ? ` · ${s.note}` : ""}`}
+                            onClick={open}
+                            title={`${t?.name ?? "Custom shift"}${s.status === "draft" ? " · draft" : ""}${s.note ? ` · ${s.note}` : ""}${conflict ? ` · ⚠ ${conflict}` : ""}`}
                           >
-                            <b>{formatShiftTime(s)}</b>
+                            <b>{conflict && "⚠ "}{formatShiftTime(s)}</b>
                             <span>{t?.name ?? "Custom"}{s.status === "draft" ? " · draft" : ""}</span>
                           </button>
+                        ) : l?.status === "approved" ? (
+                          <button className="leave-chip" onClick={open} title={l.note ?? undefined}>{leaveTypeLabel(l.leaveType)}</button>
+                        ) : off ? (
+                          <button className="off-chip" onClick={open} title={off.note ?? undefined}>Off</button>
+                        ) : holiday ? (
+                          <button className="holiday-chip" onClick={open} title={`${holiday} — click to roster someone anyway`}>Bank holiday</button>
                         ) : l ? (
-                          <span className="leave-chip">{leaveTypeLabel(l.leaveType)}</span>
+                          <button className="leave-chip pending" onClick={open} title="Leave requested, not yet approved">{leaveTypeLabel(l.leaveType)}?</button>
                         ) : (
-                          <button className="roster-add" onClick={() => setEditing({ employee: e, date: d, shift: null })} aria-label={`Add shift for ${e.fullName} on ${d}`}>
+                          <button className="roster-add" onClick={open} aria-label={`Plan ${e.fullName} on ${d}`}>
                             <Icon name="plus" size={14} />
                           </button>
                         )}
@@ -4069,7 +4350,8 @@ function RosterView({ setNotice }: NoticeProps) {
             })}
           </div>
           <p className="muted small roster-legend">
-            Dashed = draft (not visible to employees until published). Coloured bar = template. Empty days are days off.
+            Dashed = draft (not visible to employees until published). Coloured bar = template. &ldquo;Off&rdquo;, leave and bank holidays are skipped by
+            Fill week; plain empty days may be filled. &ldquo;Annual?&rdquo; = requested, not approved yet. ⚠ = shift clashes with leave or a bank holiday.
           </p>
         </section>
       )}
@@ -4077,10 +4359,18 @@ function RosterView({ setNotice }: NoticeProps) {
   );
 }
 
-function RosterShiftModal({
+type RosterDayMode = "shift" | "off" | "leave";
+
+// One person, one day: a shift, an explicit day off, or leave booked on their
+// behalf (typically unpaid).
+function RosterDayModal({
   employee,
   date,
   shift,
+  dayOff,
+  leave,
+  holiday,
+  canCancelLeave,
   templates,
   onClose,
   onSaved,
@@ -4088,17 +4378,25 @@ function RosterShiftModal({
   employee: AdminEmployee;
   date: string;
   shift: RosterShift | null;
+  dayOff: DayOff | null;
+  leave: RosterLeave | null;
+  holiday: string | null;
+  canCancelLeave: boolean;
   templates: AdminWorkSchedule[];
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
+  const [mode, setMode] = useState<RosterDayMode>(dayOff ? "off" : "shift");
   const [scheduleId, setScheduleId] = useState(shift?.scheduleId ?? "");
   const [startsAt, setStartsAt] = useState(shift?.startsAt.slice(0, 5) ?? "09:00");
   const [endsAt, setEndsAt] = useState(shift?.endsAt.slice(0, 5) ?? "17:00");
   const [unpaidBreak, setUnpaidBreak] = useState(String(shift?.unpaidBreakMinutes ?? 30));
-  const [note, setNote] = useState(shift?.note ?? "");
+  const [note, setNote] = useState(shift?.note ?? dayOff?.note ?? "");
+  const [leaveType, setLeaveType] = useState("unpaid");
+  const [leaveEnds, setLeaveEnds] = useState(date);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const approvedLeave = leave?.status === "approved" ? leave : null;
 
   function pickTemplate(id: string) {
     setScheduleId(id);
@@ -4110,96 +4408,206 @@ function RosterShiftModal({
     }
   }
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    const breakMinutes = Number(unpaidBreak);
-    if (startsAt === endsAt) return setError("Start and end can't be the same time.");
-    if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
+  async function save(fn: () => Promise<string>) {
     setError(null);
     setSaving(true);
     try {
-      await saveRosterShift(shift?.id ?? null, {
-        employeeId: employee.id,
-        shiftDate: date,
-        scheduleId: scheduleId || null,
-        startsAt,
-        endsAt,
-        unpaidBreakMinutes: breakMinutes,
-        note,
-      });
-      onSaved(shift ? "Shift updated." : "Draft shift added — publish the week when ready.");
+      onSaved(await fn());
     } catch (err) {
-      setError(errorMessage(err, "Couldn't save the shift."));
-    } finally {
+      setError(errorMessage(err, "Couldn't save."));
       setSaving(false);
     }
   }
 
-  async function handleDelete() {
-    if (!shift) return;
-    if (!window.confirm(`Remove ${employee.fullName}'s shift on ${formatDate(date)}? That day becomes a day off.`)) return;
-    setSaving(true);
-    try {
-      await deleteRosterShift(shift.id);
-      onSaved("Shift removed.");
-    } catch (err) {
-      setError(errorMessage(err, "Couldn't remove the shift."));
-      setSaving(false);
+  function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (mode === "shift") {
+      const breakMinutes = Number(unpaidBreak);
+      if (startsAt === endsAt) return setError("Start and end can't be the same time.");
+      if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
+      save(async () => {
+        if (dayOff) await removeDayOff(dayOff.id);
+        await saveRosterShift(shift?.id ?? null, {
+          employeeId: employee.id,
+          shiftDate: date,
+          scheduleId: scheduleId || null,
+          startsAt,
+          endsAt,
+          unpaidBreakMinutes: breakMinutes,
+          note,
+        });
+        return shift ? "Shift updated." : "Draft shift added — publish the week when ready.";
+      });
+    } else if (mode === "off") {
+      save(async () => {
+        await setDayOff(employee.id, date, note, shift?.id ?? null);
+        return `${employee.fullName} is off on ${formatDate(date)}.`;
+      });
+    } else {
+      if (!leaveEnds || leaveEnds < date) return setError("The last day must be on or after the first.");
+      save(async () => {
+        await recordLeaveForEmployee(employee.id, leaveType, date, leaveEnds, note);
+        return `${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName}.`;
+      });
     }
   }
+
+  function handleRemoveShift() {
+    if (!shift) return;
+    if (!window.confirm(`Remove ${employee.fullName}'s shift on ${formatDate(date)}? The day will be empty and "Fill week" may fill it again — use "Day off" to keep it free.`)) return;
+    save(async () => {
+      await deleteRosterShift(shift.id);
+      return "Shift removed.";
+    });
+  }
+
+  function handleRemoveDayOff() {
+    if (!dayOff) return;
+    save(async () => {
+      await removeDayOff(dayOff.id);
+      return "Day off removed.";
+    });
+  }
+
+  function handleCancelLeave() {
+    if (!approvedLeave) return;
+    const span =
+      approvedLeave.startsOn === approvedLeave.endsOn ? formatDate(approvedLeave.startsOn) : `${formatDate(approvedLeave.startsOn)} – ${formatDate(approvedLeave.endsOn)}`;
+    if (!window.confirm(`Cancel ${employee.fullName}'s ${leaveTypeLabel(approvedLeave.leaveType).toLowerCase()} leave (${span})? Any days used are given back.`)) return;
+    save(async () => {
+      await cancelLeaveRequest(approvedLeave.id, "Removed from the roster");
+      return "Leave cancelled.";
+    });
+  }
+
+  const cancelLeaveButton = approvedLeave && canCancelLeave && (
+    <button type="button" className="outline-button danger-outline" onClick={handleCancelLeave} disabled={saving}>
+      <Icon name="trash" size={14} /> Cancel leave
+    </button>
+  );
 
   return (
     <div className="admin-modal-overlay" onClick={onClose}>
       <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
           <div>
-            <h2>{shift ? "Edit shift" : "Add shift"}</h2>
+            <h2>Plan the day</h2>
             <p className="muted small">
               {employee.fullName} · {new Date(`${date}T00:00:00`).toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" })}
-              {shift && ` · ${shift.status === "draft" ? "Draft" : "Published"}`}
+              {shift && ` · ${shift.status === "draft" ? "Draft" : "Published"} shift`}
             </p>
           </div>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
-        <form className="admin-login-form" onSubmit={handleSubmit}>
-          <label>
-            Template
-            <select value={scheduleId} onChange={(e) => pickTemplate(e.target.value)} disabled={saving}>
-              <option value="">Custom times</option>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>{t.name} ({t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)})</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Starts at
-            <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
-          </label>
-          <label>
-            Ends at
-            <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
-            {endsAt < startsAt && <small className="field-hint">Ends the next day.</small>}
-          </label>
-          <label>
-            Unpaid break (minutes)
-            <input type="number" min={0} max={480} step={5} value={unpaidBreak} onChange={(e) => setUnpaidBreak(e.target.value)} disabled={saving} />
-          </label>
-          <label>
-            Note <span className="field-optional">optional, shown to the employee</span>
-            <input value={note} onChange={(e) => setNote(e.target.value)} disabled={saving} placeholder="e.g. Loading bay 2" />
-          </label>
-          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
-          <div className="admin-modal-actions">
-            {shift && (
-              <button type="button" className="outline-button danger-outline" onClick={handleDelete} disabled={saving}>
-                <Icon name="trash" size={14} /> Remove
-              </button>
+        {holiday && <p className="roster-note holiday"><Icon name="calendar" size={14} /> Bank holiday: {holiday}</p>}
+        {leave && (
+          <p className={`roster-note${leave.status === "approved" ? " leave" : ""}`}>
+            <Icon name="calendar" size={14} /> {leaveTypeLabel(leave.leaveType)} leave {leave.status === "approved" ? "booked" : "requested, pending approval"}:{" "}
+            {leave.startsOn === leave.endsOn ? formatDate(leave.startsOn) : `${formatDate(leave.startsOn)} – ${formatDate(leave.endsOn)}`}
+            {leave.note && <> · {leave.note}</>}
+          </p>
+        )}
+        {approvedLeave && !shift ? (
+          <>
+            {!canCancelLeave && <p className="muted small">Only HR, their manager, or whoever booked it can cancel this leave.</p>}
+            {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+            <div className="admin-modal-actions">
+              {cancelLeaveButton}
+              <span className="toolbar-spacer" />
+              <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Close</button>
+            </div>
+          </>
+        ) : (
+          <form className="admin-login-form" onSubmit={handleSubmit}>
+            <div className="module-tabs roster-mode">
+              <button type="button" className={mode === "shift" ? "active" : ""} onClick={() => setMode("shift")} disabled={saving}>Shift</button>
+              <button type="button" className={mode === "off" ? "active" : ""} onClick={() => setMode("off")} disabled={saving}>Day off</button>
+              {!approvedLeave && (
+                <button type="button" className={mode === "leave" ? "active" : ""} onClick={() => setMode("leave")} disabled={saving}>Leave</button>
+              )}
+            </div>
+            {mode === "shift" && (
+              <>
+                <label>
+                  Template
+                  <select value={scheduleId} onChange={(e) => pickTemplate(e.target.value)} disabled={saving}>
+                    <option value="">Custom times</option>
+                    {templates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name} ({t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)})</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Starts at
+                  <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
+                </label>
+                <label>
+                  Ends at
+                  <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
+                  {endsAt < startsAt && <small className="field-hint">Ends the next day.</small>}
+                </label>
+                <label>
+                  Unpaid break (minutes)
+                  <input type="number" min={0} max={480} step={5} value={unpaidBreak} onChange={(e) => setUnpaidBreak(e.target.value)} disabled={saving} />
+                </label>
+              </>
             )}
-            <span className="toolbar-spacer" />
-            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
-            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save shift"}</button>
-          </div>
-        </form>
+            {mode === "off" && (
+              <p className="muted small roster-mode-hint">
+                {dayOff
+                  ? "Marked as a day off. Switch to Shift to roster them instead, or remove the marker."
+                  : `Keeps ${formatDate(date)} free: Fill week and Copy last week won't put a shift here.${shift ? " Their shift that day will be removed." : ""}`}
+              </p>
+            )}
+            {mode === "leave" && (
+              <>
+                <label>
+                  Leave type
+                  <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} disabled={saving}>
+                    {leaveTypeOptions.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Last day
+                  <DateInput required value={leaveEnds} min={date} onChange={setLeaveEnds} disabled={saving} />
+                </label>
+                <p className="muted small roster-mode-hint">
+                  Booked as approved leave starting {formatDate(date)}. Annual and sick leave come out of their balance; unpaid and other don&apos;t
+                  (unless HR set an &ldquo;other&rdquo; allowance). Shifts in this period are removed.
+                </p>
+              </>
+            )}
+            {!(mode === "off" && dayOff) && (
+              <label>
+                Note <span className="field-optional">{mode === "shift" ? "optional, shown to the employee" : "optional"}</span>
+                <input value={note} onChange={(e) => setNote(e.target.value)} disabled={saving} placeholder={mode === "shift" ? "e.g. Loading bay 2" : "e.g. Family matter"} />
+              </label>
+            )}
+            {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+            <div className="admin-modal-actions">
+              {shift && mode === "shift" && (
+                <button type="button" className="outline-button danger-outline" onClick={handleRemoveShift} disabled={saving}>
+                  <Icon name="trash" size={14} /> Remove
+                </button>
+              )}
+              {dayOff && mode === "off" && (
+                <button type="button" className="outline-button danger-outline" onClick={handleRemoveDayOff} disabled={saving}>
+                  <Icon name="trash" size={14} /> Remove day off
+                </button>
+              )}
+              {cancelLeaveButton}
+              <span className="toolbar-spacer" />
+              <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+              {!(mode === "off" && dayOff) && (
+                <button className="primary-admin" type="submit" disabled={saving}>
+                  {saving ? "Saving…" : mode === "shift" ? "Save shift" : mode === "off" ? "Mark day off" : "Record leave"}
+                </button>
+              )}
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );

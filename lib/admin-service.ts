@@ -398,6 +398,8 @@ export interface AdminLeaveRequest {
   leaveType: string;
   startsOn: string;
   endsOn: string;
+  // Days this leave costs: calendar days minus bank holidays, fixed when it was requested.
+  workingDays: number;
   status: string;
   employeeName: string;
 }
@@ -405,7 +407,7 @@ export interface AdminLeaveRequest {
 export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
     .eq("status", "pending")
     .order("created_at");
   if (error) throw error;
@@ -417,6 +419,7 @@ export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
       leaveType: row.leave_type,
       startsOn: row.starts_on,
       endsOn: row.ends_on,
+      workingDays: row.working_days,
       status: row.status,
       employeeName: profile?.full_name ?? "Unknown",
     };
@@ -429,7 +432,7 @@ export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
 export async function listReviewedLeaveRequests(): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
     .in("status", ["approved", "rejected"])
     .order("created_at", { ascending: false })
     .limit(50);
@@ -442,6 +445,7 @@ export async function listReviewedLeaveRequests(): Promise<AdminLeaveRequest[]> 
       leaveType: row.leave_type,
       startsOn: row.starts_on,
       endsOn: row.ends_on,
+      workingDays: row.working_days,
       status: row.status,
       employeeName: profile?.full_name ?? "Unknown",
     };
@@ -456,7 +460,7 @@ export async function listUpcomingLeave(): Promise<AdminLeaveRequest[]> {
   const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
     .in("status", ["pending", "approved"])
     .gte("ends_on", today)
     .order("starts_on");
@@ -469,6 +473,7 @@ export async function listUpcomingLeave(): Promise<AdminLeaveRequest[]> {
       leaveType: row.leave_type,
       startsOn: row.starts_on,
       endsOn: row.ends_on,
+      workingDays: row.working_days,
       status: row.status,
       employeeName: profile?.full_name ?? "Unknown",
     };
@@ -1160,7 +1165,7 @@ export function currentLeaveYearStart(today = new Date()): string {
 export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
     .eq("leave_type", "medical")
     .in("status", ["pending", "approved", "rejected"])
     .gte("ends_on", fromDate)
@@ -1174,6 +1179,7 @@ export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise
       leaveType: row.leave_type,
       startsOn: row.starts_on,
       endsOn: row.ends_on,
+      workingDays: row.working_days,
       status: row.status,
       employeeName: profile?.full_name ?? "Unknown",
     };

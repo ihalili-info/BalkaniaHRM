@@ -2470,7 +2470,9 @@ function LeaveTypeFilter({ value, onChange }: { value: LeaveTypeFilterValue; onC
 }
 
 // Calendar days, inclusive -- the same count the server uses for balances.
-function leaveDays(row: { startsOn: string; endsOn: string }) {
+function leaveDays(row: { startsOn: string; endsOn: string; workingDays?: number }) {
+  // Stored per request: calendar days minus bank holidays.
+  if (row.workingDays !== undefined) return row.workingDays;
   return Math.round((Date.parse(`${row.endsOn}T00:00:00Z`) - Date.parse(`${row.startsOn}T00:00:00Z`)) / 86400000) + 1;
 }
 
@@ -4315,7 +4317,7 @@ function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePr
                     const open = () => setEditing({ employee: e, date: d });
                     // A shift on a leave day or a bank holiday is allowed
                     // (someone may have to cover) but flagged.
-                    const conflict = s ? (l?.status === "approved" ? `On ${leaveTypeLabel(l.leaveType).toLowerCase()} leave` : holiday ? `Bank holiday: ${holiday}` : null) : null;
+                    const conflict = s ? (holiday ? `Bank holiday: ${holiday}` : l?.status === "approved" ? `On ${leaveTypeLabel(l.leaveType).toLowerCase()} leave` : null) : null;
                     return (
                       <span role="gridcell" key={d} className={`roster-cell${d === today ? " today" : ""}${holiday ? " holiday" : ""}`}>
                         {s ? (
@@ -4328,12 +4330,12 @@ function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePr
                             <b>{conflict && "⚠ "}{formatShiftTime(s)}</b>
                             <span>{t?.name ?? "Custom"}{s.status === "draft" ? " · draft" : ""}</span>
                           </button>
+                        ) : holiday ? (
+                          <button className="holiday-chip" onClick={open} title={`${holiday} — not counted as leave; click to roster someone anyway`}>Bank holiday</button>
                         ) : l?.status === "approved" ? (
                           <button className="leave-chip" onClick={open} title={l.note ?? undefined}>{leaveTypeLabel(l.leaveType)}</button>
                         ) : off ? (
                           <button className="off-chip" onClick={open} title={off.note ?? undefined}>Off</button>
-                        ) : holiday ? (
-                          <button className="holiday-chip" onClick={open} title={`${holiday} — click to roster someone anyway`}>Bank holiday</button>
                         ) : l ? (
                           <button className="leave-chip pending" onClick={open} title="Leave requested, not yet approved">{leaveTypeLabel(l.leaveType)}?</button>
                         ) : (
@@ -4507,7 +4509,7 @@ function RosterDayModal({
             {leave.note && <> · {leave.note}</>}
           </p>
         )}
-        {approvedLeave && !shift ? (
+        {approvedLeave && !shift && !holiday ? (
           <>
             {!canCancelLeave && <p className="muted small">Only HR, their manager, or whoever booked it can cancel this leave.</p>}
             {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
@@ -4574,8 +4576,8 @@ function RosterDayModal({
                   <DateInput required value={leaveEnds} min={date} onChange={setLeaveEnds} disabled={saving} />
                 </label>
                 <p className="muted small roster-mode-hint">
-                  Booked as approved leave starting {formatDate(date)}. Annual and sick leave come out of their balance; unpaid and other don&apos;t
-                  (unless HR set an &ldquo;other&rdquo; allowance). Shifts in this period are removed.
+                  Booked as approved leave starting {formatDate(date)}. Bank holidays inside the period aren&apos;t counted. Annual and sick leave come
+                  out of their balance; unpaid and other don&apos;t (unless HR set an &ldquo;other&rdquo; allowance). Shifts in this period are removed.
                 </p>
               </>
             )}

@@ -1243,3 +1243,23 @@ export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise
     };
   });
 }
+
+// Company-wide switch: when on, phone clock-ins in office mode must be inside
+// the employee's approved location (enforced in record_attendance_event, see
+// 20261019_geofence_toggle.sql). HR-only to change.
+export async function getGeofenceEnforced(): Promise<boolean> {
+  const { data, error } = await client().from("app_settings").select("geofence_enforced").maybeSingle();
+  if (error) throw error;
+  return data?.geofence_enforced ?? false;
+}
+
+export async function setGeofenceEnforced(enforced: boolean): Promise<void> {
+  const { data: auth } = await client().auth.getSession();
+  const { data, error } = await client()
+    .from("app_settings")
+    .update({ geofence_enforced: enforced, updated_at: new Date().toISOString(), updated_by: auth.session?.user.id ?? null })
+    .eq("id", true)
+    .select("id");
+  if (error) throw error;
+  if (!data?.length) throw new Error("Only HR can change this setting.");
+}

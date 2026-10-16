@@ -196,8 +196,14 @@
 .settings-panel > button { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 17px 0; border: 0; border-bottom: 1px solid var(--line); background: var(--surface); text-align: left; }
 .settings-panel button small { display: block; margin-top: 4px; color: var(--muted); }
 .settings-panel > .primary-admin { display: inline-flex; margin-top: 20px; }
-.switch input { display: none; }
-.switch span { display: block; width: 40px; height: 23px; border-radius: var(--radius-pill); background: var(--line-strong); }
+.switch { cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch span { position: relative; display: block; width: 40px; height: 23px; border-radius: var(--radius-pill); background: var(--line-strong); transition: background 0.15s; }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); transition: transform 0.15s; }
+.switch input:checked + span { background: var(--success); }
+.switch input:checked + span::after { transform: translateX(17px); }
+.switch input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 2px; }
+.switch input:disabled + span { opacity: 0.5; cursor: default; }
 
 .spin { animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

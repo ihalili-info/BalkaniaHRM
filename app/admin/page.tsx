@@ -129,6 +129,8 @@ import {
   listReviewedLeaveRequests,
   listTeamLeadCandidates,
   listTeams,
+  getGeofenceEnforced,
+  setGeofenceEnforced,
   teamTree,
   teamWithSubTeams,
   listTimesheet,
@@ -6359,6 +6361,8 @@ function Devices({ setNotice }: NoticeProps) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [pinReveal, setPinReveal] = useState<{ label: string; pin: string } | null>(null);
+  const [geofence, setGeofence] = useState<boolean | null>(null);
+  const [savingGeofence, setSavingGeofence] = useState(false);
 
   function load() {
     listAttendanceDevices()
@@ -6368,7 +6372,31 @@ function Devices({ setNotice }: NoticeProps) {
 
   useEffect(() => {
     load();
+    getGeofenceEnforced()
+      .then(setGeofence)
+      .catch(() => setGeofence(false));
   }, []);
+
+  async function handleGeofence(next: boolean) {
+    if (
+      next &&
+      !window.confirm(
+        "Turn on the geolocation rule? Phone clock-ins in office mode will be blocked unless the phone is inside the employee's approved location. " +
+          "Anyone with phone clock-in but no approved location set will have to use the kiosk.",
+      )
+    )
+      return;
+    setSavingGeofence(true);
+    try {
+      await setGeofenceEnforced(next);
+      setGeofence(next);
+      setNotice(next ? "Geolocation rule on: office clock-ins from phones must be on site." : "Geolocation rule off: phone clock-ins are only flagged, not blocked.");
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't change the geolocation rule."));
+    } finally {
+      setSavingGeofence(false);
+    }
+  }
 
   async function handleRegenerate(device: AdminDevice) {
     setBusyId(device.id);
@@ -6459,10 +6487,17 @@ function Devices({ setNotice }: NoticeProps) {
         )}
         <section className="setting-card">
           <div>
-            <b>Optional geolocation rule</b>
-            <p className="muted">Enable later to limit direct mobile clock-ins to approved locations.</p>
+            <b>Geolocation rule {geofence !== null && <span className={`pill ${geofence ? "success" : ""}`}>{geofence ? "On" : "Off"}</span>}</b>
+            <p className="muted">
+              {geofence
+                ? "Phone clock-ins in office mode are blocked unless the phone is within the employee's approved location. Kiosk scans aren't affected."
+                : "Phone clock-ins are allowed anywhere and only flagged Off-site / Unverified on the Attendance screen. Turn on to block them."}
+            </p>
           </div>
-          <label className="switch"><input type="checkbox" /><span /></label>
+          <label className="switch" aria-label="Geolocation rule">
+            <input type="checkbox" checked={!!geofence} disabled={geofence === null || savingGeofence} onChange={(e) => handleGeofence(e.target.checked)} />
+            <span />
+          </label>
         </section>
       </section>
     </>

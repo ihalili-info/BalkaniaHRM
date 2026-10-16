@@ -129,6 +129,8 @@ import {
   listReviewedLeaveRequests,
   listTeamLeadCandidates,
   listTeams,
+  teamTree,
+  teamWithSubTeams,
   listTimesheet,
   listUpcomingLeave,
   listWorkSchedules,
@@ -1513,8 +1515,7 @@ function Teams({ setNotice }: NoticeProps) {
   const [teams, setTeams] = useState<AdminTeam[] | null>(null);
   const [employees, setEmployees] = useState<AdminEmployee[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [showModal, setShowModal] = useState(false);
-  const [editingTeam, setEditingTeam] = useState<AdminTeam | null>(null);
+  const [editing, setEditing] = useState<AdminTeam | "new" | null>(null);
   const [search, setSearch] = useState("");
 
   function load() {
@@ -1534,27 +1535,19 @@ function Teams({ setNotice }: NoticeProps) {
     if (e.teamId) acc[e.teamId] = (acc[e.teamId] ?? 0) + 1;
     return acc;
   }, {});
+  const searching = search.trim().length > 0;
 
   return (
     <>
-      <Toolbar action="Create team" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search teams, leads or managers" />
-      {showModal && (
-        <CreateTeamModal
-          onClose={() => setShowModal(false)}
-          onCreated={(team) => {
-            setShowModal(false);
-            setNotice(`Team "${team.name}" created.`);
-            load();
-          }}
-        />
-      )}
-      {editingTeam && (
-        <EditTeamModal
-          team={editingTeam}
-          onClose={() => setEditingTeam(null)}
-          onSaved={(team) => {
-            setEditingTeam(null);
-            setNotice(`Team "${team.name}" was updated.`);
+      <Toolbar action="Create team" onAction={() => setEditing("new")} search={search} onSearch={setSearch} searchPlaceholder="Search teams, leads or managers" />
+      {editing && teams && (
+        <TeamModal
+          team={editing === "new" ? null : editing}
+          teams={teams}
+          onClose={() => setEditing(null)}
+          onSaved={(team, created) => {
+            setEditing(null);
+            setNotice(created ? `Team "${team.name}" created.` : `Team "${team.name}" was updated.`);
             load();
           }}
         />
@@ -1567,116 +1560,57 @@ function Teams({ setNotice }: NoticeProps) {
         <EmptyPanel icon="users" title="No teams yet" note="Create a team and assign a manager so employees can be added to it." />
       ) : (
         <section className="panel">
-          <div className="table-head cols-5"><b>Team</b><b>Team lead</b><b>Manager</b><b>Members</b><b className="actions-head">Actions</b></div>
-          {teams.filter((team) => matchesSearch(search, team.name, team.teamLeadName, team.managerName)).map((team) => (
-            <div className="table-row cols-5" key={team.id}>
-              <span>{team.name}</span>
-              <span>{team.teamLeadName ?? <span className="pill pending">No lead</span>}</span>
-              <span>{team.managerName ?? <span className="pill pending">No manager</span>}</span>
-              <span>{memberCounts[team.id] ?? 0}</span>
-              <span className="row-actions">
-                <button className="icon-action" onClick={() => setEditingTeam(team)} aria-label={`Edit ${team.name}`}>
-                  <Icon name="edit" size={15} />
-                </button>
-              </span>
-            </div>
-          ))}
+          <div className="table-head cols-5"><b>Team</b><b>Team leads</b><b>Manager</b><b>Members</b><b className="actions-head">Actions</b></div>
+          {teamTree(teams)
+            .filter(({ team }) => matchesSearch(search, team.name, team.managerName, ...team.leads.map((l) => l.fullName)))
+            .map(({ team, depth }) => {
+              const parent = teams.find((t) => t.id === team.parentTeamId);
+              const subTeams = teamWithSubTeams(team.id, teams);
+              const totalMembers = Array.from(subTeams).reduce((sum, id) => sum + (memberCounts[id] ?? 0), 0);
+              return (
+                <div className="table-row cols-5" key={team.id}>
+                  <span style={{ paddingLeft: searching ? 0 : depth * 18 }}>
+                    {depth > 0 && !searching && <span className="muted">└ </span>}
+                    {team.name}
+                    {parent && searching && <em className="asset-sub">under {parent.name}</em>}
+                  </span>
+                  <span>{team.leads.length ? team.leads.map((l) => l.fullName).join(", ") : <span className="pill">No lead</span>}</span>
+                  <span>
+                    {team.managerName ?? (parent?.managerName ? <span className="muted">{parent.managerName} (from {parent.name})</span> : <span className="pill pending">No manager</span>)}
+                  </span>
+                  <span>
+                    {memberCounts[team.id] ?? 0}
+                    {subTeams.size > 1 && <em className="asset-sub">{totalMembers} incl. sub-teams</em>}
+                  </span>
+                  <span className="row-actions">
+                    <button className="icon-action" onClick={() => setEditing(team)} aria-label={`Edit ${team.name}`}>
+                      <Icon name="edit" size={15} />
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
         </section>
       )}
     </>
   );
 }
 
-function CreateTeamModal({ onClose, onCreated }: { onClose: () => void; onCreated: (team: AdminTeam) => void }) {
-  const [name, setName] = useState("");
-  const [managerId, setManagerId] = useState("");
-  const [teamLeadId, setTeamLeadId] = useState("");
-  const [managers, setManagers] = useState<AdminManagerOption[]>([]);
-  const [leadCandidates, setLeadCandidates] = useState<AdminManagerOption[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    listManagers()
-      .then(setManagers)
-      .catch(() => setManagers([]));
-    listTeamLeadCandidates()
-      .then(setLeadCandidates)
-      .catch(() => setLeadCandidates([]));
-  }, []);
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (teamLeadId && teamLeadId === managerId) {
-      setError("The team lead and manager must be different people — a manager can't override their own decisions.");
-      return;
-    }
-    setError(null);
-    setSaving(true);
-    try {
-      const team = await createTeam({ name, managerId: managerId || null, teamLeadId: teamLeadId || null });
-      onCreated(team);
-    } catch (err) {
-      setError(errorMessage(err, "Couldn't create the team."));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="admin-modal-overlay" onClick={onClose}>
-      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="admin-modal-header">
-          <h2>Create team</h2>
-          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
-        </div>
-        <p className="muted small">The team lead handles this team day to day. The manager sits above them and can reverse a lead&apos;s leave decision.</p>
-        <form className="admin-login-form" onSubmit={handleSubmit}>
-          <label>
-            Team name
-            <input required value={name} onChange={(e) => setName(e.target.value)} disabled={saving} />
-          </label>
-          <label>
-            Team lead
-            <select value={teamLeadId} onChange={(e) => setTeamLeadId(e.target.value)} disabled={saving}>
-              <option value="">Assign later</option>
-              {leadCandidates.map((m) => (
-                <option key={m.id} value={m.id}>{m.fullName}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Manager
-            <select value={managerId} onChange={(e) => setManagerId(e.target.value)} disabled={saving}>
-              <option value="">Assign later</option>
-              {managers.map((m) => (
-                <option key={m.id} value={m.id}>{m.fullName}</option>
-              ))}
-            </select>
-          </label>
-          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
-          <div className="admin-modal-actions">
-            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
-            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Creating…" : "Create team"}</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function EditTeamModal({
+function TeamModal({
   team,
+  teams,
   onClose,
   onSaved,
 }: {
-  team: AdminTeam;
+  team: AdminTeam | null;
+  teams: AdminTeam[];
   onClose: () => void;
-  onSaved: (team: AdminTeam) => void;
+  onSaved: (team: AdminTeam, created: boolean) => void;
 }) {
-  const [name, setName] = useState(team.name);
-  const [managerId, setManagerId] = useState(team.managerId ?? "");
-  const [teamLeadId, setTeamLeadId] = useState(team.teamLeadId ?? "");
+  const [name, setName] = useState(team?.name ?? "");
+  const [managerId, setManagerId] = useState(team?.managerId ?? "");
+  const [parentTeamId, setParentTeamId] = useState(team?.parentTeamId ?? "");
+  const [leadIds, setLeadIds] = useState<string[]>(team?.leads.map((l) => l.id) ?? []);
   const [managers, setManagers] = useState<AdminManagerOption[]>([]);
   const [leadCandidates, setLeadCandidates] = useState<AdminManagerOption[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1691,58 +1625,91 @@ function EditTeamModal({
       .catch(() => setLeadCandidates([]));
   }, []);
 
+  // A team can't sit under itself or one of its own sub-teams.
+  const blockedParents = team ? teamWithSubTeams(team.id, teams) : new Set<string>();
+  const parent = teams.find((t) => t.id === parentTeamId);
+
+  function toggleLead(id: string) {
+    setLeadIds((current) => (current.includes(id) ? current.filter((x) => x !== id) : [...current, id]));
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (teamLeadId && teamLeadId === managerId) {
-      setError("The team lead and manager must be different people — a manager can't override their own decisions.");
+    if (managerId && leadIds.includes(managerId)) {
+      setError("The manager can't also be a lead of the same team — a manager can't override their own decisions.");
       return;
     }
     setError(null);
     setSaving(true);
     try {
-      const updated = await updateTeam({ id: team.id, name, managerId: managerId || null, teamLeadId: teamLeadId || null });
-      onSaved(updated);
+      const input = { name, managerId: managerId || null, parentTeamId: parentTeamId || null, leadIds };
+      const saved = team ? await updateTeam(team.id, input) : await createTeam(input);
+      onSaved(saved, !team);
     } catch (err) {
-      setError(errorMessage(err, "Couldn't save changes."));
+      setError(errorMessage(err, team ? "Couldn't save changes." : "Couldn't create the team."));
     } finally {
       setSaving(false);
     }
   }
 
+  // Show current leads even if their role changed since, so they can be removed.
+  const leadOptions = [...leadCandidates, ...(team?.leads ?? []).filter((l) => !leadCandidates.some((c) => c.id === l.id))];
+
   return (
     <div className="admin-modal-overlay" onClick={onClose}>
       <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
         <div className="admin-modal-header">
-          <h2>Edit team</h2>
+          <h2>{team ? "Edit team" : "Create team"}</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
+        <p className="muted small">
+          Team leads handle this team day to day. The manager sits above them, can reverse a lead&apos;s leave decision, and also supervises any
+          sub-teams.
+        </p>
         <form className="admin-login-form" onSubmit={handleSubmit}>
           <label>
             Team name
             <input required value={name} onChange={(e) => setName(e.target.value)} disabled={saving} />
           </label>
           <label>
-            Team lead
-            <select value={teamLeadId} onChange={(e) => setTeamLeadId(e.target.value)} disabled={saving}>
-              <option value="">Unassigned</option>
-              {leadCandidates.map((m) => (
-                <option key={m.id} value={m.id}>{m.fullName}</option>
-              ))}
+            Sits under <span className="field-optional">optional</span>
+            <select value={parentTeamId} onChange={(e) => setParentTeamId(e.target.value)} disabled={saving}>
+              <option value="">Top level</option>
+              {teamTree(teams)
+                .filter(({ team: t }) => !blockedParents.has(t.id))
+                .map(({ team: t, depth }) => (
+                  <option key={t.id} value={t.id}>{"  ".repeat(depth)}{t.name}</option>
+                ))}
             </select>
           </label>
           <label>
             Manager
             <select value={managerId} onChange={(e) => setManagerId(e.target.value)} disabled={saving}>
-              <option value="">Unassigned</option>
+              <option value="">{parent?.managerName ? `None of its own (${parent.managerName} via ${parent.name})` : "Assign later"}</option>
               {managers.map((m) => (
                 <option key={m.id} value={m.id}>{m.fullName}</option>
               ))}
             </select>
           </label>
+          <fieldset className="lead-picker">
+            <legend>Team leads <span className="field-optional">any number</span></legend>
+            {leadOptions.length === 0 ? (
+              <p className="muted small">No one has the team lead role yet. Set it on the employee first.</p>
+            ) : (
+              leadOptions.map((m) => (
+                <label key={m.id} className="checkbox-row">
+                  <input type="checkbox" checked={leadIds.includes(m.id)} onChange={() => toggleLead(m.id)} disabled={saving} />
+                  <span>{m.fullName}</span>
+                </label>
+              ))
+            )}
+          </fieldset>
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">
             <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
-            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Save changes"}</button>
+            <button className="primary-admin" type="submit" disabled={saving}>
+              {saving ? (team ? "Saving…" : "Creating…") : team ? "Save changes" : "Create team"}
+            </button>
           </div>
         </form>
       </div>
@@ -1778,9 +1745,7 @@ function TeamControls({
     <>
       <select className="team-select" value={team} onChange={(e) => onTeam(e.target.value)} aria-label="Filter by team">
         <option value="">All teams</option>
-        {teams.map((t) => (
-          <option key={t.id} value={t.id}>{t.name}</option>
-        ))}
+        <TeamFilterOptions teams={teams} />
         <option value="none">{NO_TEAM}</option>
       </select>
       <select className="team-select" value={sort} onChange={(e) => onSort(e.target.value)} aria-label="Sort">
@@ -1792,8 +1757,26 @@ function TeamControls({
   );
 }
 
-function matchesTeam(filter: string, teamId: string | null | undefined) {
-  return !filter || (filter === "none" ? !teamId : teamId === filter);
+// Options for a team filter: parents first with sub-teams indented beneath.
+// Choosing a parent team also matches everyone in its sub-teams.
+function TeamFilterOptions({ teams }: { teams: AdminTeam[] }) {
+  return (
+    <>
+      {teamTree(teams).map(({ team, depth }) => (
+        <option key={team.id} value={team.id}>
+          {"\u00a0\u00a0\u00a0".repeat(depth)}
+          {team.name}
+          {teams.some((t) => t.parentTeamId === team.id) ? " (all)" : ""}
+        </option>
+      ))}
+    </>
+  );
+}
+
+function matchesTeam(filter: string, teamId: string | null | undefined, teams: AdminTeam[]) {
+  if (!filter) return true;
+  if (filter === "none") return !teamId;
+  return !!teamId && teamWithSubTeams(filter, teams).has(teamId);
 }
 
 // Team A-Z (no team last), then the given tiebreak.
@@ -1878,7 +1861,7 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
 
   const teamOf = (row: AdminAttendanceSession) => employees.get(row.employeeId)?.teamName ?? null;
   const visible = (rows ?? [])
-    .filter((r) => matchesTeam(teamFilter, employees.get(r.employeeId)?.teamId) && matchesSearch(search, r.employeeName, r.employeeCode))
+    .filter((r) => matchesTeam(teamFilter, employees.get(r.employeeId)?.teamId, teams) && matchesSearch(search, r.employeeName, r.employeeCode))
     .sort((a, b) => {
       const byClockIn = a.workDate.localeCompare(b.workDate) || (a.clockedInAt ?? "").localeCompare(b.clockedInAt ?? "");
       if (sort === "name") return a.employeeName.localeCompare(b.employeeName) || byClockIn;
@@ -2204,7 +2187,7 @@ function Timesheets({ setNotice }: NoticeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]);
 
-  const inTeam = (employeeId: string) => matchesTeam(teamFilter, names.get(employeeId)?.teamId);
+  const inTeam = (employeeId: string) => matchesTeam(teamFilter, names.get(employeeId)?.teamId, teams);
   const teamOf = (employeeId: string) => names.get(employeeId)?.teamName ?? null;
   const sheetRows = rows?.filter((r) => inTeam(r.employeeId)) ?? null;
   const rosterShifts = roster.filter((s) => inTeam(s.employeeId));
@@ -4138,7 +4121,7 @@ function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePr
   }, [week]);
 
   const visible = (employees ?? [])
-    .filter((e) => (!teamFilter || e.teamId === teamFilter) && matchesSearch(search, e.fullName, e.teamName))
+    .filter((e) => matchesTeam(teamFilter, e.teamId, teams) && matchesSearch(search, e.fullName, e.teamName))
     .sort((a, b) => (a.teamName ?? "~").localeCompare(b.teamName ?? "~") || a.fullName.localeCompare(b.fullName));
   const visibleIds = visible.map((e) => e.id);
   const shiftAt = new Map(shifts.map((s) => [`${s.employeeId}|${s.shiftDate}`, s]));
@@ -4237,9 +4220,8 @@ function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePr
         </div>
         <select className="team-select" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} aria-label="Filter by team">
           <option value="">All teams</option>
-          {teams.map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
+          <TeamFilterOptions teams={teams} />
+          <option value="none">{NO_TEAM}</option>
         </select>
       </div>
       <div className="roster-actions">

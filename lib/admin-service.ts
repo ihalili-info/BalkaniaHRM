@@ -269,30 +269,38 @@ export interface AdminTeam {
   name: string;
   managerId: string | null;
   managerName: string | null;
-  teamLeadId: string | null;
-  teamLeadName: string | null;
+  // The team this one sits under; its manager also supervises this team.
+  parentTeamId: string | null;
+  // Every lead has the same authority over the team (see team_leads).
+  leads: Array<{ id: string; fullName: string }>;
 }
 
 const TEAM_COLUMNS =
-  "id,name,manager_id,team_lead_id,manager:profiles!teams_manager_id_fkey(full_name),lead:profiles!teams_team_lead_id_fkey(full_name)";
+  "id,name,manager_id,parent_team_id,manager:profiles!teams_manager_id_fkey(full_name),team_leads(employee_id,profiles(full_name))";
+
+type NameEmbed = { full_name: string } | { full_name: string }[] | null | undefined;
+
+function embeddedName(row: NameEmbed) {
+  return (Array.isArray(row) ? row[0] : row)?.full_name ?? null;
+}
 
 function mapTeam(row: {
   id: string;
   name: string;
   manager_id: string | null;
-  team_lead_id: string | null;
-  manager?: { full_name: string } | { full_name: string }[] | null;
-  lead?: { full_name: string } | { full_name: string }[] | null;
+  parent_team_id: string | null;
+  manager?: NameEmbed;
+  team_leads?: Array<{ employee_id: string; profiles?: NameEmbed }> | null;
 }): AdminTeam {
-  const manager = Array.isArray(row.manager) ? row.manager[0] : row.manager;
-  const lead = Array.isArray(row.lead) ? row.lead[0] : row.lead;
   return {
     id: row.id,
     name: row.name,
     managerId: row.manager_id,
-    managerName: manager?.full_name ?? null,
-    teamLeadId: row.team_lead_id,
-    teamLeadName: lead?.full_name ?? null,
+    managerName: embeddedName(row.manager),
+    parentTeamId: row.parent_team_id,
+    leads: (row.team_leads ?? [])
+      .map((l) => ({ id: l.employee_id, fullName: embeddedName(l.profiles) ?? "Unknown" }))
+      .sort((a, b) => a.fullName.localeCompare(b.fullName)),
   };
 }
 
@@ -302,38 +310,88 @@ export async function listTeams(): Promise<AdminTeam[]> {
   return (data ?? []).map(mapTeam);
 }
 
-export interface CreateTeamInput {
+export interface TeamInput {
   name: string;
-  managerId?: string | null;
-  teamLeadId?: string | null;
+  managerId: string | null;
+  parentTeamId: string | null;
+  leadIds: string[];
 }
 
-export async function createTeam(input: CreateTeamInput): Promise<AdminTeam> {
-  const { data, error } = await client()
-    .from("teams")
-    .insert({ name: input.name, manager_id: input.managerId || null, team_lead_id: input.teamLeadId || null })
-    .select(TEAM_COLUMNS)
-    .single();
+// Makes team_leads match `leadIds` exactly. HR-only by RLS.
+async function syncTeamLeads(teamId: string, leadIds: string[]): Promise<void> {
+  let removal = client().from("team_leads").delete().eq("team_id", teamId);
+  if (leadIds.length) removal = removal.not("employee_id", "in", `(${leadIds.join(",")})`);
+  const { error: removeError } = await removal;
+  if (removeError) throw removeError;
+  if (leadIds.length) {
+    const { error } = await client()
+      .from("team_leads")
+      .upsert(leadIds.map((employeeId) => ({ team_id: teamId, employee_id: employeeId })), { onConflict: "team_id,employee_id", ignoreDuplicates: true });
+    if (error) throw error;
+  }
+}
+
+async function reloadTeam(id: string): Promise<AdminTeam> {
+  const { data, error } = await client().from("teams").select(TEAM_COLUMNS).eq("id", id).single();
   if (error) throw error;
   return mapTeam(data);
 }
 
-export interface UpdateTeamInput {
-  id: string;
-  name: string;
-  managerId?: string | null;
-  teamLeadId?: string | null;
-}
-
-export async function updateTeam(input: UpdateTeamInput): Promise<AdminTeam> {
+export async function createTeam(input: TeamInput): Promise<AdminTeam> {
   const { data, error } = await client()
     .from("teams")
-    .update({ name: input.name, manager_id: input.managerId || null, team_lead_id: input.teamLeadId || null })
-    .eq("id", input.id)
-    .select(TEAM_COLUMNS)
+    .insert({ name: input.name, manager_id: input.managerId || null, parent_team_id: input.parentTeamId || null })
+    .select("id")
     .single();
   if (error) throw error;
-  return mapTeam(data);
+  await syncTeamLeads(data.id, input.leadIds);
+  return reloadTeam(data.id);
+}
+
+export async function updateTeam(id: string, input: TeamInput): Promise<AdminTeam> {
+  const { error } = await client()
+    .from("teams")
+    .update({ name: input.name, manager_id: input.managerId || null, parent_team_id: input.parentTeamId || null })
+    .eq("id", id);
+  if (error) throw error;
+  await syncTeamLeads(id, input.leadIds);
+  return reloadTeam(id);
+}
+
+// Team ids in display order (each parent followed by its sub-teams) with
+// their depth, for indented pickers.
+export function teamTree(teams: AdminTeam[]): Array<{ team: AdminTeam; depth: number }> {
+  const ids = new Set(teams.map((t) => t.id));
+  const children = new Map<string | null, AdminTeam[]>();
+  for (const t of teams) {
+    const parent = t.parentTeamId && ids.has(t.parentTeamId) ? t.parentTeamId : null;
+    children.set(parent, [...(children.get(parent) ?? []), t]);
+  }
+  const out: Array<{ team: AdminTeam; depth: number }> = [];
+  const walk = (parent: string | null, depth: number) => {
+    for (const t of (children.get(parent) ?? []).sort((a, b) => a.name.localeCompare(b.name))) {
+      out.push({ team: t, depth });
+      walk(t.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+}
+
+// A team plus every team below it.
+export function teamWithSubTeams(teamId: string, teams: AdminTeam[]): Set<string> {
+  const result = new Set([teamId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const t of teams) {
+      if (t.parentTeamId && result.has(t.parentTeamId) && !result.has(t.id)) {
+        result.add(t.id);
+        grew = true;
+      }
+    }
+  }
+  return result;
 }
 
 export interface AdminAttendanceLocation {

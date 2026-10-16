@@ -487,3 +487,8 @@
 .rc-cell.today { outline: 2px solid var(--brand); outline-offset: 1px; }
 .late-flag { color: var(--warning); }
 .under-hours { color: var(--danger); font-weight: 600; }
+
+/* Team modal: any number of leads. */
+.lead-picker { grid-column: 1 / -1; margin: 4px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); max-height: 220px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 12px; }
+.lead-picker legend { padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.lead-picker .checkbox-row { margin: 0; font-size: 13px; }

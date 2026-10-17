@@ -39,6 +39,7 @@ import {
   type Holiday,
   type MonthSessionSummary,
 } from "../lib/employee-service";
+import { CERTIFICATE_ACCEPT, STATUTORY_SICK_DAYS, getSickLeaveStatus, uploadMedicalCertificate, type SickLeaveStatus } from "../lib/sick-leave-service";
 import { isAdminPortalRole } from "../lib/domain";
 import type {
   AttendanceEventRecord,
@@ -257,6 +258,7 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
   const [monthSessions, setMonthSessions] = useState<MonthSessionSummary[]>([]);
   const [leaveBalances, setLeaveBalances] = useState<LeaveBalance[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequestRecord[]>([]);
+  const [sickStatus, setSickStatus] = useState<SickLeaveStatus | null>(null);
   const [onLeaveToday, setOnLeaveToday] = useState<OnLeaveEntry[]>([]);
   const [disciplinaryNotes, setDisciplinaryNotes] = useState<DisciplinaryNote[]>([]);
   const [loading, setLoading] = useState(true);
@@ -266,7 +268,7 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
-    const [session, events, sessions, balances, requests, onLeave, notes] = await Promise.all([
+    const [session, events, sessions, balances, requests, onLeave, notes, sick] = await Promise.all([
       getTodaySession(),
       getTodayEvents(),
       getMonthSessions(monthStart, monthEnd),
@@ -274,12 +276,15 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
       getLeaveRequests(),
       getWhoIsOnLeaveToday(),
       getMyDisciplinaryNotes(),
+      // Only feeds the sick days line; the rest of the app works without it.
+      getSickLeaveStatus(profile.id, toIsoDate(now)).catch(() => null),
     ]);
     setAttendanceState(session?.state ?? "not_started");
     setTodayEvents(events);
     setMonthSessions(sessions);
     setLeaveBalances(balances);
     setLeaveRequests(requests);
+    setSickStatus(sick);
     setOnLeaveToday(onLeave);
     setDisciplinaryNotes(notes);
   }
@@ -407,11 +412,37 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
     }
   }
 
-  async function handleLeaveSubmit(input: Parameters<typeof submitLeaveRequest>[0]) {
-    await submitLeaveRequest(input);
-    const requests = await getLeaveRequests();
-    setLeaveRequests(requests);
-    setNotice("Leave request submitted for approval.");
+  async function handleLeaveSubmit(input: Parameters<typeof submitLeaveRequest>[0], certificate: File | null) {
+    const request = await submitLeaveRequest(input);
+    // The request is saved either way; a failed upload can be retried from the list.
+    let uploadError: string | null = null;
+    if (certificate) {
+      try {
+        await uploadMedicalCertificate(profile.id, request.id, certificate);
+      } catch (err) {
+        uploadError = errorMessage(err, "Couldn't upload the certificate.");
+      }
+    }
+    setLeaveRequests(await getLeaveRequests());
+    if (input.leaveType !== "medical") {
+      setNotice("Leave request submitted for approval.");
+    } else if (uploadError) {
+      setNotice(`Sick day reported, but the certificate didn't upload: ${uploadError} Add it from your requests.`);
+    } else if (!certificate) {
+      setNotice("Sick day reported. Add your medical certificate from your requests so it can be approved.");
+    } else {
+      setNotice("Sick day reported with your medical certificate.");
+    }
+  }
+
+  async function handleCertificateUpload(requestId: string, file: File) {
+    try {
+      await uploadMedicalCertificate(profile.id, requestId, file);
+      setLeaveRequests(await getLeaveRequests());
+      setNotice("Medical certificate added.");
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't upload the certificate."));
+    }
   }
 
   return (
@@ -447,7 +478,14 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
               />
             )}
             {screen === "leaves" && (
-              <LeavesScreen profile={profile} balances={leaveBalances} requests={leaveRequests} onSubmit={handleLeaveSubmit} />
+              <LeavesScreen
+                profile={profile}
+                balances={leaveBalances}
+                requests={leaveRequests}
+                sickStatus={sickStatus}
+                onSubmit={handleLeaveSubmit}
+                onUploadCertificate={handleCertificateUpload}
+              />
             )}
             {screen === "code" && (
               <CodeScreen
@@ -596,19 +634,33 @@ function LeavesScreen({
   profile,
   balances,
   requests,
+  sickStatus,
   onSubmit,
+  onUploadCertificate,
 }: {
   profile: Profile;
   balances: LeaveBalance[];
   requests: LeaveRequestRecord[];
-  onSubmit: (input: Parameters<typeof submitLeaveRequest>[0]) => Promise<void>;
+  sickStatus: SickLeaveStatus | null;
+  onSubmit: (input: Parameters<typeof submitLeaveRequest>[0], certificate: File | null) => Promise<void>;
+  onUploadCertificate: (requestId: string, file: File) => Promise<void>;
 }) {
   const [tab, setTab] = useState<"mine" | "team">("mine");
   const [openForm, setOpenForm] = useState(false);
+  const [uploadingId, setUploadingId] = useState<string | null>(null);
   const isManager = isAdminPortalRole(profile.role);
   const annual = balances.find((b) => b.leaveType === "annual");
   const available = annual ? annual.earned - annual.used : 0;
-  const sick = balances.find((b) => b.leaveType === "medical");
+
+  async function uploadCertificate(requestId: string, file: File | undefined) {
+    if (!file) return;
+    setUploadingId(requestId);
+    try {
+      await onUploadCertificate(requestId, file);
+    } finally {
+      setUploadingId(null);
+    }
+  }
 
   return (
     <>
@@ -643,9 +695,18 @@ function LeavesScreen({
             ) : (
               <p className="muted">No leave entitlement configured yet. Ask HR to set your leave balance.</p>
             )}
-            {sick && (
+            {sickStatus && (
               <p className="sick-balance">
-                Sick days available: <b>{formatDays(sick.earned - sick.used)}</b>
+                {sickStatus.qualified ? (
+                  <>
+                    Paid sick days left in {sickStatus.yearStart.slice(0, 4)}: <b>{formatDays(Math.max(0, sickStatus.remaining))}</b> of{" "}
+                    {formatDays(sickStatus.entitlement)}
+                  </>
+                ) : (
+                  <>
+                    Paid sick leave starts on <b>{formatDate(sickStatus.qualifiesOn)}</b>, after 13 weeks&apos; service.
+                  </>
+                )}
               </p>
             )}
           </section>
@@ -661,6 +722,25 @@ function LeavesScreen({
                       <span className="muted small">
                         {formatDate(request.startsOn)} – {formatDate(request.endsOn)}
                       </span>
+                      {request.leaveType === "medical" && (request.status === "pending" || request.status === "approved") &&
+                        (request.medicalCertificatePath ? (
+                          <span className="muted small">Medical certificate added</span>
+                        ) : (
+                          <label className="text-button certificate-upload">
+                            <Icon name="upload" size={14} />
+                            {uploadingId === request.id ? "Uploading…" : "Add medical certificate"}
+                            <input
+                              type="file"
+                              accept={CERTIFICATE_ACCEPT}
+                              hidden
+                              disabled={uploadingId === request.id}
+                              onChange={(e) => {
+                                uploadCertificate(request.id, e.target.files?.[0]);
+                                e.target.value = "";
+                              }}
+                            />
+                          </label>
+                        ))}
                     </div>
                     <span className={`pill ${statusClass(request.status)}`}>{request.status}</span>
                   </li>
@@ -687,26 +767,49 @@ function LeavesScreen({
         </section>
       )}
 
-      {openForm && <LeaveForm onCancel={() => setOpenForm(false)} onSubmit={onSubmit} />}
+      {openForm && <LeaveForm profileId={profile.id} onCancel={() => setOpenForm(false)} onSubmit={onSubmit} />}
     </>
   );
 }
 
 function LeaveForm({
+  profileId,
   onCancel,
   onSubmit,
 }: {
+  profileId: string;
   onCancel: () => void;
-  onSubmit: (input: Parameters<typeof submitLeaveRequest>[0]) => Promise<void>;
+  onSubmit: (input: Parameters<typeof submitLeaveRequest>[0], certificate: File | null) => Promise<void>;
 }) {
   const [kind, setKind] = useState<LeaveType>("annual");
   const [startsOn, setStartsOn] = useState("");
   const [endsOn, setEndsOn] = useState("");
   const [note, setNote] = useState("");
+  const [certificate, setCertificate] = useState<File | null>(null);
+  // Paid sick leave standing on the first sick day (or today), to warn before submitting.
+  const [sickStatus, setSickStatus] = useState<SickLeaveStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function submit() {
+  useEffect(() => {
+    if (kind !== "medical") return;
+    let active = true;
+    getSickLeaveStatus(profileId, startsOn || toIsoDate(new Date()))
+      .then((status) => {
+        if (active) setSickStatus(status);
+      })
+      .catch(() => {
+        if (active) setSickStatus(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [kind, startsOn, profileId]);
+
+  // The server refuses these as sick leave; they can still go in as unpaid.
+  const sickBlocked = kind === "medical" && sickStatus !== null && (!sickStatus.qualified || sickStatus.remaining <= 0);
+
+  async function submit(leaveType: LeaveType = kind) {
     if (!startsOn || !endsOn) {
       setError("Choose a start and end date.");
       return;
@@ -714,7 +817,7 @@ function LeaveForm({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit({ leaveType: kind, startsOn, endsOn, note: note || undefined });
+      await onSubmit({ leaveType, startsOn, endsOn, note: note || undefined }, leaveType === "medical" ? certificate : null);
       onCancel();
     } catch (err) {
       setError(errorMessage(err, "Couldn't submit the request."));
@@ -749,14 +852,52 @@ function LeaveForm({
           End date
           <DateInput required value={endsOn} onChange={setEndsOn} />
         </label>
+        {kind === "medical" && (
+          <label>
+            Medical certificate
+            <input type="file" accept={CERTIFICATE_ACCEPT} onChange={(e) => setCertificate(e.target.files?.[0] ?? null)} />
+            <small className="muted">A doctor&apos;s certificate is needed before paid sick leave can be approved. You can add it later.</small>
+          </label>
+        )}
         <label>
           Note
           <textarea placeholder="Optional note" value={note} onChange={(e) => setNote(e.target.value)} />
         </label>
+        {kind === "medical" && sickStatus && (
+          sickBlocked ? (
+            <div className="form-warning">
+              <Icon name="warning" size={15} />
+              <p>
+                {!sickStatus.qualified ? (
+                  <>
+                    Paid sick leave starts after 13 weeks of continuous service. On {formatDate(startsOn || toIsoDate(new Date()))} you&apos;ll
+                    have worked {sickStatus.weeksOfService} of those 13 weeks; you qualify from <b>{formatDate(sickStatus.qualifiesOn)}</b>.
+                  </>
+                ) : (
+                  <>
+                    You&apos;ve used all {formatDays(sickStatus.entitlement)} paid sick days for {sickStatus.yearStart.slice(0, 4)}. They reset on 1 January.
+                  </>
+                )}{" "}
+                You can still let your manager know you&apos;re off sick by submitting these days as unpaid leave.
+              </p>
+            </div>
+          ) : (
+            <small className="muted">
+              {formatDays(sickStatus.remaining)} of {formatDays(sickStatus.entitlement)} paid sick days left for {sickStatus.yearStart.slice(0, 4)}.
+              Statutory sick pay is 70% of your normal daily pay (up to €110 a day) for up to {STATUTORY_SICK_DAYS} days a year.
+            </small>
+          )
+        )}
         {error && <p className="form-error"><Icon name="warning" size={15} />{error}</p>}
-        <button className="primary-button" onClick={submit} disabled={submitting}>
-          {submitting ? "Submitting…" : "Submit request"}
-        </button>
+        {sickBlocked ? (
+          <button className="primary-button" onClick={() => submit("unpaid")} disabled={submitting}>
+            {submitting ? "Submitting…" : "Submit as unpaid leave"}
+          </button>
+        ) : (
+          <button className="primary-button" onClick={() => submit()} disabled={submitting}>
+            {submitting ? "Submitting…" : kind === "medical" ? "Report sick day" : "Submit request"}
+          </button>
+        )}
         <button className="text-button" onClick={onCancel}>Cancel</button>
       </div>
     </div>

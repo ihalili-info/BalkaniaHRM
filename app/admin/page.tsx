@@ -123,7 +123,7 @@ import {
   listEmployees,
   listLeaveBalances,
   listSickLeave,
-  currentLeaveYearStart,
+  currentSickYearStart,
   listManagers,
   listPendingLeaveRequests,
   listReviewedLeaveRequests,
@@ -196,6 +196,14 @@ import {
   type PayType,
   type PayslipLineType,
 } from "../../lib/payroll-service";
+import {
+  CERTIFICATE_ACCEPT,
+  STATUTORY_SICK_DAYS,
+  getMedicalCertificateUrl,
+  getStatutorySickPaySummary,
+  uploadMedicalCertificate,
+  type StatutorySickPay,
+} from "../../lib/sick-leave-service";
 
 type Module =
   | "dashboard"
@@ -2461,7 +2469,8 @@ function leaveDays(row: { startsOn: string; endsOn: string; workingDays?: number
   return Math.round((Date.parse(`${row.endsOn}T00:00:00Z`) - Date.parse(`${row.startsOn}T00:00:00Z`)) / 86400000) + 1;
 }
 
-// Per-employee sick leave for the current leave year (1 April onward).
+// Per-employee sick leave for the current calendar year (sick leave resets on
+// 1 January under the Sick Leave Act 2022, unlike the April leave year).
 // "Occasions" counts approved sick requests, each request being one absence.
 // "Days taken" is the sick balance's "used" when there is one: approvals add to
 // it, and HR can set it directly (e.g. days taken before Balkania HRM), so it
@@ -2474,12 +2483,19 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
   const [expanded, setExpanded] = useState<string | null>(null);
   // undefined = closed, null = "Set sick days" for a person picked in the modal.
   const [editing, setEditing] = useState<{ employeeId: string; employeeName: string } | null | undefined>(undefined);
-  const yearStart = currentLeaveYearStart();
+  // HR only: statutory sick pay per employee for the year.
+  const [sickPay, setSickPay] = useState<Map<string, StatutorySickPay>>(new Map());
+  const yearStart = currentSickYearStart();
 
   function load() {
     listSickLeave(yearStart)
       .then(setRows)
       .catch((err) => setError(errorMessage(err, "Couldn't load sick leave.")));
+    if (isHrAdmin) {
+      getStatutorySickPaySummary(Number(yearStart.slice(0, 4)))
+        .then((data) => setSickPay(new Map(data.map((d) => [d.employeeId, d]))))
+        .catch(() => setSickPay(new Map()));
+    }
     // Balances are a nice-to-have; the report still works from requests alone.
     listLeaveBalances()
       .then(setBalances)
@@ -2529,6 +2545,7 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
     days: people.reduce((sum, p) => sum + p.daysTaken, 0),
     people: people.filter((p) => p.daysTaken > 0).length,
     pending: (rows ?? []).filter((r) => r.status === "pending").length,
+    sickPay: [...sickPay.values()].reduce((sum, p) => sum + p.sspAmount, 0),
   };
 
   async function handleExport() {
@@ -2536,10 +2553,10 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
     const nameOf = await loadExportNames();
     downloadCsv(
       `sick-leave-${yearStart.slice(0, 4)}-${new Date().toISOString().slice(0, 10)}.csv`,
-      ["Name", "Surname", "From", "To", "Days", "Status"],
+      ["Name", "Surname", "From", "To", "Days", "Status", "Medical certificate"],
       [...rows]
         .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.startsOn.localeCompare(b.startsOn))
-        .map((r) => [...nameOf(r.employeeId, r.employeeName), r.startsOn, r.endsOn, leaveDays(r), r.status]),
+        .map((r) => [...nameOf(r.employeeId, r.employeeName), r.startsOn, r.endsOn, leaveDays(r), r.status, r.medicalCertificatePath ? "Yes" : "No"]),
     );
   }
 
@@ -2547,8 +2564,15 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
     <>
       <div className="admin-stats">
         <Stat label="Sick days taken" value={formatLeaveDays(totals.days)} note={`Approved, since ${formatDate(yearStart)}`} />
-        <Stat label="Employees off sick" value={String(totals.people)} note="At least one sick day this leave year" />
-        <Stat label="Pending sick requests" value={String(totals.pending)} note="Awaiting a decision" />
+        <Stat label="Employees off sick" value={String(totals.people)} note="At least one sick day this year" />
+        <Stat label="Pending sick requests" value={String(totals.pending)} note="Awaiting a certificate or decision" />
+        {isHrAdmin && (
+          <Stat
+            label="Statutory sick pay"
+            value={`€${totals.sickPay.toFixed(2)}`}
+            note={`Up to ${STATUTORY_SICK_DAYS} certified days each, 70% of daily pay capped at €110`}
+          />
+        )}
       </div>
       <Toolbar
         action={isHrAdmin ? "Set sick days" : undefined}
@@ -2575,7 +2599,7 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
       ) : !rows ? (
         <LoadingPanel />
       ) : people.length === 0 ? (
-        <EmptyPanel icon="calendar" title="No sick leave this leave year" note={`Sick days declared since ${formatDate(yearStart)} will appear here.`} />
+        <EmptyPanel icon="calendar" title="No sick leave this year" note={`Sick days declared since ${formatDate(yearStart)} will appear here.`} />
       ) : (
         <section className="panel">
           <div className="table-head cols-6">
@@ -2591,6 +2615,12 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
                 <span>
                   <b>{formatLeaveDays(p.daysTaken)}</b>
                   {p.pendingDays > 0 && <em className="asset-sub">+{p.pendingDays} pending</em>}
+                  {sickPay.get(p.employeeId) && (
+                    <em className="asset-sub">
+                      {sickPay.get(p.employeeId)!.sspDays} SSP day{sickPay.get(p.employeeId)!.sspDays === 1 ? "" : "s"} · €
+                      {sickPay.get(p.employeeId)!.sspAmount.toFixed(2)}
+                    </em>
+                  )}
                 </span>
                 <span>{p.occasions}</span>
                 <span>{p.lastSickDay ? formatDate(p.lastSickDay) : "—"}</span>
@@ -2625,6 +2655,13 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
                       <span>{formatDate(e.startsOn)}{e.endsOn !== e.startsOn ? ` – ${formatDate(e.endsOn)}` : ""}</span>
                       <span className="muted small">{leaveDays(e)} day{leaveDays(e) === 1 ? "" : "s"}</span>
                       <span className={`pill ${leaveStatusClass(e.status)}`}>{e.status}</span>
+                      <MedicalCertificateControl
+                        employeeId={e.employeeId}
+                        requestId={e.id}
+                        path={e.medicalCertificatePath}
+                        onUploaded={load}
+                        setNotice={setNotice}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -2637,8 +2674,8 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
   );
 }
 
-// Sets the sick days taken this leave year (the "medical" balance's used) and,
-// optionally, a yearly sick allowance. "Remaining" isn't sent, so any imported
+// Sets the sick days taken this calendar year (the "medical" balance's used)
+// and the yearly sick allowance (at least the statutory days). "Remaining" isn't sent, so any imported
 // adjustment stays as it is.
 function SickDaysModal({
   person,
@@ -2656,7 +2693,7 @@ function SickDaysModal({
   const [employeeId, setEmployeeId] = useState(person?.employeeId ?? "");
   const current = balances.find((b) => b.employeeId === employeeId) ?? null;
   const [used, setUsed] = useState(current ? formatLeaveDays(current.used) : "");
-  const [entitlement, setEntitlement] = useState(current ? formatLeaveDays(current.entitlement) : "0");
+  const [entitlement, setEntitlement] = useState(current ? formatLeaveDays(current.entitlement) : String(STATUTORY_SICK_DAYS));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -2671,7 +2708,7 @@ function SickDaysModal({
     setEmployeeId(id);
     const balance = balances.find((b) => b.employeeId === id);
     setUsed(balance ? formatLeaveDays(balance.used) : "");
-    setEntitlement(balance ? formatLeaveDays(balance.entitlement) : "0");
+    setEntitlement(balance ? formatLeaveDays(balance.entitlement) : String(STATUTORY_SICK_DAYS));
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -2686,8 +2723,8 @@ function SickDaysModal({
       return;
     }
     const entitlementValue = Number(entitlement);
-    if (entitlement.trim() === "" || !Number.isFinite(entitlementValue) || entitlementValue < 0) {
-      setError("Yearly sick allowance must be zero or more.");
+    if (entitlement.trim() === "" || !Number.isFinite(entitlementValue) || entitlementValue < STATUTORY_SICK_DAYS) {
+      setError(`The yearly sick allowance can't be less than the statutory ${STATUTORY_SICK_DAYS} days.`);
       return;
     }
     setError(null);
@@ -2722,16 +2759,19 @@ function SickDaysModal({
             </label>
           )}
           <label>
-            Sick days taken this leave year
+            Sick days taken this year
             <input type="number" min="0" step="0.5" required value={used} onChange={(e) => setUsed(e.target.value)} disabled={saving} />
             <small className="field-hint">
-              Total since {formatDate(currentLeaveYearStart())}, including days from before Balkania HRM. Approved sick requests add to this automatically.
+              Total since {formatDate(currentSickYearStart())}, including days from before Balkania HRM. Approved sick requests add to this automatically.
             </small>
           </label>
           <label>
             Yearly sick allowance (days)
-            <input type="number" min="0" step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
-            <small className="field-hint">Builds up 1/12 per month like annual leave. Employees can only declare a sick day in the app while they have sick days left.</small>
+            <input type="number" min={STATUTORY_SICK_DAYS} step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
+            <small className="field-hint">
+              At least the statutory {STATUTORY_SICK_DAYS} days. The whole allowance is available once someone has 13 weeks&apos; service, and it
+              resets on 1 January. Sick days beyond it, or before 13 weeks, are booked as unpaid leave.
+            </small>
           </label>
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">
@@ -2873,6 +2913,15 @@ function DecidedLeave({
           {canOverride || isHrAdmin ? (
             <span className="row-actions">
               <span className={`pill ${leaveStatusClass(row.status)}`}>{row.status}</span>
+              {row.leaveType === "medical" && (
+                <MedicalCertificateControl
+                  employeeId={row.employeeId}
+                  requestId={row.id}
+                  path={row.medicalCertificatePath}
+                  onUploaded={load}
+                  setNotice={setNotice}
+                />
+              )}
               {canOverride && (
                 <button
                   className={`icon-action ${row.status === "approved" ? "reject" : "approve"}`}
@@ -2935,6 +2984,64 @@ function UpcomingLeave({ typeFilter }: { typeFilter: LeaveTypeFilterValue }) {
         </div>
       ))}
     </section>
+  );
+}
+
+// View or add the doctor's certificate on a sick leave request. Approval needs
+// one (review_leave_request refuses without it), so it sits beside the decision.
+function MedicalCertificateControl({
+  employeeId,
+  requestId,
+  path,
+  onUploaded,
+  setNotice,
+}: NoticeProps & { employeeId: string; requestId: string; path: string | null; onUploaded: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  async function view() {
+    if (!path) return;
+    // Open the tab synchronously so popup blockers allow it, then point it at the signed URL.
+    const tab = window.open("about:blank", "_blank");
+    try {
+      const url = await getMedicalCertificateUrl(path);
+      if (tab) tab.location.href = url;
+    } catch (err) {
+      tab?.close();
+      setNotice(errorMessage(err, "Couldn't open the certificate."));
+    }
+  }
+
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    setBusy(true);
+    try {
+      await uploadMedicalCertificate(employeeId, requestId, file);
+      setNotice("Medical certificate added.");
+      onUploaded();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't upload the certificate."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return path ? (
+    <button className="icon-action" onClick={view} aria-label="View medical certificate" title="View medical certificate">
+      <Icon name="download" size={15} />
+    </button>
+  ) : (
+    <label className="icon-action file-button" aria-label="Upload medical certificate" title="No medical certificate yet: upload it to allow approval">
+      <Icon name={busy ? "spinner" : "upload"} size={15} />
+      <input
+        type="file"
+        accept={CERTIFICATE_ACCEPT}
+        disabled={busy}
+        onChange={(e) => {
+          upload(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
+    </label>
   );
 }
 
@@ -3049,10 +3156,36 @@ function LeaveRequests({
                 <span>{leaveTypeLabel(row.leaveType)}</span>
                 <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
                 {isOwnRequest ? (
-                  <span className="pill pending">Awaiting HR approval</span>
+                  <span className="row-actions">
+                    {row.leaveType === "medical" && (
+                      <MedicalCertificateControl
+                        employeeId={row.employeeId}
+                        requestId={row.id}
+                        path={row.medicalCertificatePath}
+                        onUploaded={load}
+                        setNotice={setNotice}
+                      />
+                    )}
+                    <span className="pill pending">Awaiting HR approval</span>
+                  </span>
                 ) : (
                   <span className="row-actions">
-                    <button className="icon-action approve" disabled={busyId === row.id} onClick={() => decide(row.id, "approved")} aria-label="Approve">
+                    {row.leaveType === "medical" && (
+                      <MedicalCertificateControl
+                        employeeId={row.employeeId}
+                        requestId={row.id}
+                        path={row.medicalCertificatePath}
+                        onUploaded={load}
+                        setNotice={setNotice}
+                      />
+                    )}
+                    <button
+                      className="icon-action approve"
+                      disabled={busyId === row.id || (row.leaveType === "medical" && !row.medicalCertificatePath)}
+                      onClick={() => decide(row.id, "approved")}
+                      aria-label="Approve"
+                      title={row.leaveType === "medical" && !row.medicalCertificatePath ? "Needs a medical certificate before it can be approved" : "Approve"}
+                    >
                       <Icon name="check" size={15} />
                     </button>
                     <button className="icon-action reject" disabled={busyId === row.id} onClick={() => decide(row.id, "rejected")} aria-label="Reject">
@@ -4433,7 +4566,9 @@ function RosterDayModal({
       if (!leaveEnds || leaveEnds < date) return setError("The last day must be on or after the first.");
       save(async () => {
         await recordLeaveForEmployee(employee.id, leaveType, date, leaveEnds, note);
-        return `${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName}.`;
+        return leaveType === "medical"
+          ? `Sick leave recorded for ${employee.fullName}. It stays pending until their medical certificate is uploaded and it's approved.`
+          : `${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName}.`;
       });
     }
   }
@@ -4561,7 +4696,8 @@ function RosterDayModal({
                 </label>
                 <p className="muted small roster-mode-hint">
                   Booked as approved leave starting {formatDate(date)}. Bank holidays inside the period aren&apos;t counted. Annual and sick leave come
-                  out of their balance; unpaid and other don&apos;t (unless HR set an &ldquo;other&rdquo; allowance). Shifts in this period are removed.
+                  out of their balance; unpaid and other don&apos;t (unless HR set an &ldquo;other&rdquo; allowance). Sick leave stays pending until
+                  a medical certificate is uploaded in Leave management. Shifts in this period are removed.
                 </p>
               </>
             )}

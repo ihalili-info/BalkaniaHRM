@@ -459,13 +459,15 @@ export interface AdminLeaveRequest {
   // Days this leave costs: calendar days minus bank holidays, fixed when it was requested.
   workingDays: number;
   status: string;
+  // Sick leave only: the doctor's certificate, required before approval.
+  medicalCertificatePath: string | null;
   employeeName: string;
 }
 
 export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,medical_certificate_path,profiles!leave_requests_employee_id_fkey(full_name)")
     .eq("status", "pending")
     .order("created_at");
   if (error) throw error;
@@ -479,6 +481,7 @@ export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
       endsOn: row.ends_on,
       workingDays: row.working_days,
       status: row.status,
+      medicalCertificatePath: row.medical_certificate_path,
       employeeName: profile?.full_name ?? "Unknown",
     };
   });
@@ -490,7 +493,7 @@ export async function listPendingLeaveRequests(): Promise<AdminLeaveRequest[]> {
 export async function listReviewedLeaveRequests(): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,medical_certificate_path,profiles!leave_requests_employee_id_fkey(full_name)")
     .in("status", ["approved", "rejected"])
     .order("created_at", { ascending: false })
     .limit(50);
@@ -505,6 +508,7 @@ export async function listReviewedLeaveRequests(): Promise<AdminLeaveRequest[]> 
       endsOn: row.ends_on,
       workingDays: row.working_days,
       status: row.status,
+      medicalCertificatePath: row.medical_certificate_path,
       employeeName: profile?.full_name ?? "Unknown",
     };
   });
@@ -518,7 +522,7 @@ export async function listUpcomingLeave(): Promise<AdminLeaveRequest[]> {
   const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,medical_certificate_path,profiles!leave_requests_employee_id_fkey(full_name)")
     .in("status", ["pending", "approved"])
     .gte("ends_on", today)
     .order("starts_on");
@@ -533,6 +537,7 @@ export async function listUpcomingLeave(): Promise<AdminLeaveRequest[]> {
       endsOn: row.ends_on,
       workingDays: row.working_days,
       status: row.status,
+      medicalCertificatePath: row.medical_certificate_path,
       employeeName: profile?.full_name ?? "Unknown",
     };
   });
@@ -1216,14 +1221,20 @@ export function currentLeaveYearStart(today = new Date()): string {
   return `${year}-04-01`;
 }
 
-// All sick ("medical") leave touching the current leave year, any status
+// Sick leave runs on the calendar year (Sick Leave Act 2022), not the April
+// leave year -- see 20261021_statutory_sick_leave.sql.
+export function currentSickYearStart(today = new Date()): string {
+  return `${today.getFullYear()}-01-01`;
+}
+
+// All sick ("medical") leave touching the current sick year, any status
 // except cancelled -- for the Sick leave report. Unlike listReviewedLeaveRequests
 // this isn't capped, since totals must include every request. RLS scopes rows
 // (HR: everyone; managers/leads: their people).
-export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise<AdminLeaveRequest[]> {
+export async function listSickLeave(fromDate = currentSickYearStart()): Promise<AdminLeaveRequest[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,profiles!leave_requests_employee_id_fkey(full_name)")
+    .select("id,employee_id,leave_type,starts_on,ends_on,working_days,status,medical_certificate_path,profiles!leave_requests_employee_id_fkey(full_name)")
     .eq("leave_type", "medical")
     .in("status", ["pending", "approved", "rejected"])
     .gte("ends_on", fromDate)
@@ -1239,6 +1250,7 @@ export async function listSickLeave(fromDate = currentLeaveYearStart()): Promise
       endsOn: row.ends_on,
       workingDays: row.working_days,
       status: row.status,
+      medicalCertificatePath: row.medical_certificate_path,
       employeeName: profile?.full_name ?? "Unknown",
     };
   });

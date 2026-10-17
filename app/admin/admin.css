@@ -409,7 +409,7 @@
 .sick-person:last-child { border-bottom: 0; }
 .sick-person > .table-row { border-bottom: 0; }
 .sick-entries { list-style: none; margin: 0 0 12px 46px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--surface-subtle); }
-.sick-entries li { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 13px; }
+.sick-entries li { display: grid; grid-template-columns: 1fr auto auto auto; gap: 12px; align-items: center; padding: 6px 0; font-size: 13px; }
 .rotate-90 { transform: rotate(90deg); transition: transform 0.15s; }
 @media (max-width: 800px) { .sick-entries { margin-left: 0; } }
 

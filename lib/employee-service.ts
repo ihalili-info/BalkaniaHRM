@@ -115,7 +115,7 @@ export async function getLeaveBalances(): Promise<LeaveBalance[]> {
 export async function getLeaveRequests(): Promise<LeaveRequestRecord[]> {
   const { data, error } = await client()
     .from("leave_requests")
-    .select("id,leave_type,starts_on,ends_on,status,note,created_at")
+    .select("id,leave_type,starts_on,ends_on,status,note,created_at,medical_certificate_path")
     .eq("employee_id", await myId())
     .order("created_at", { ascending: false });
   if (error) throw error;
@@ -127,6 +127,7 @@ export async function getLeaveRequests(): Promise<LeaveRequestRecord[]> {
     status: row.status,
     note: row.note,
     createdAt: row.created_at,
+    medicalCertificatePath: row.medical_certificate_path,
   }));
 }
 
@@ -186,7 +187,7 @@ export async function submitLeaveRequest(input: LeaveRequestInput): Promise<Leav
       ends_on: input.endsOn,
       note: input.note ?? null,
     })
-    .select("id,leave_type,starts_on,ends_on,status,note,created_at")
+    .select("id,leave_type,starts_on,ends_on,status,note,created_at,medical_certificate_path")
     .single();
   if (error) throw error;
   return {
@@ -197,5 +198,6 @@ export async function submitLeaveRequest(input: LeaveRequestInput): Promise<Leav
     status: data.status,
     note: data.note,
     createdAt: data.created_at,
+    medicalCertificatePath: data.medical_certificate_path,
   };
 }

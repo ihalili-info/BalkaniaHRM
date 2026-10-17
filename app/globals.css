@@ -353,6 +353,10 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 }
 .sick-balance { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
 .sick-balance b { color: var(--ink); }
+.form-warning { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--warning-line); border-radius: var(--radius-sm); background: var(--warning-soft); color: var(--warning); font-size: 13px; line-height: 1.45; }
+.form-warning svg { flex-shrink: 0; margin-top: 2px; }
+.form-warning p { margin: 0; }
+.card label.certificate-upload { display: inline-flex; margin: 4px 0 0; font-size: 13px; cursor: pointer; }
 
 /* DateInput (components/date-input.tsx): a text field that accepts pasted dates
    in any format, with a calendar button that opens the native picker. The

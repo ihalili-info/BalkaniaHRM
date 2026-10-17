@@ -68,6 +68,8 @@ export interface LeaveRequestRecord {
   status: LeaveStatus;
   note: string | null;
   createdAt: string;
+  // Sick leave only: the uploaded doctor's certificate, required before approval.
+  medicalCertificatePath: string | null;
 }
 
 export interface AttendanceEventRecord {

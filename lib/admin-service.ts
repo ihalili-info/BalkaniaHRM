@@ -28,12 +28,13 @@ export interface AdminEmployee {
   attendanceLocationId: string | null;
   attendanceLocationName: string | null;
   selfServiceAttendance: boolean;
+  phoneClockOut: boolean;
   active: boolean;
   startDate: string | null;
 }
 
 const EMPLOYEE_COLUMNS =
-  "id,full_name,first_name,last_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,active,start_date,teams!profiles_team_id_fkey(name),attendance_locations!profiles_attendance_location_id_fkey(name)";
+  "id,full_name,first_name,last_name,employee_code,role,team_id,attendance_location_id,self_service_attendance,phone_clock_out,active,start_date,teams!profiles_team_id_fkey(name),attendance_locations!profiles_attendance_location_id_fkey(name)";
 
 function mapEmployee(row: {
   id: string;
@@ -45,6 +46,7 @@ function mapEmployee(row: {
   team_id: string | null;
   attendance_location_id: string | null;
   self_service_attendance: boolean;
+  phone_clock_out: boolean;
   active: boolean;
   start_date: string | null;
   teams: { name: string } | { name: string }[] | null;
@@ -65,6 +67,7 @@ function mapEmployee(row: {
     attendanceLocationId: row.attendance_location_id,
     attendanceLocationName: location?.name ?? null,
     selfServiceAttendance: row.self_service_attendance,
+    phoneClockOut: row.phone_clock_out,
     active: row.active,
     startDate: row.start_date,
   };
@@ -133,6 +136,7 @@ export async function createEmployee(input: CreateEmployeeInput): Promise<AdminE
     attendanceLocationId: data.attendanceLocationId ?? null,
     attendanceLocationName: null,
     selfServiceAttendance: data.selfServiceAttendance ?? false,
+    phoneClockOut: false,
     active: true,
     startDate: data.startDate ?? null,
   };
@@ -188,6 +192,7 @@ export interface UpdateEmployeeInput {
   teamId?: string | null;
   attendanceLocationId?: string | null;
   selfServiceAttendance?: boolean;
+  phoneClockOut?: boolean;
   startDate?: string;
 }
 
@@ -203,6 +208,7 @@ export async function updateEmployee(input: UpdateEmployeeInput): Promise<AdminE
       team_id: input.teamId || null,
       attendance_location_id: input.attendanceLocationId || null,
       ...(input.selfServiceAttendance !== undefined ? { self_service_attendance: input.selfServiceAttendance } : {}),
+      ...(input.phoneClockOut !== undefined ? { phone_clock_out: input.phoneClockOut } : {}),
       ...(input.startDate ? { start_date: input.startDate } : {}),
     })
     .eq("id", input.id)
@@ -210,6 +216,14 @@ export async function updateEmployee(input: UpdateEmployeeInput): Promise<AdminE
     .single();
   if (error) throw error;
   return mapEmployee(data);
+}
+
+// Lets someone clock out from the app while still clocking in at the kiosk
+// (20261022_phone_clock_out.sql). Separate from createEmployee so the
+// create-employee Edge Function doesn't need redeploying for it.
+export async function setPhoneClockOut(employeeId: string, enabled: boolean): Promise<void> {
+  const { error } = await client().from("profiles").update({ phone_clock_out: enabled }).eq("id", employeeId);
+  if (error) throw error;
 }
 
 // Returns the address the reset was sent to, so the UI can confirm *where* it

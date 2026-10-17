@@ -53,7 +53,7 @@ export async function getMyProfile(): Promise<Profile | null> {
   if (!auth.user) return null;
   const { data, error } = await client()
     .from("profiles")
-    .select("id,full_name,employee_code,role,active,self_service_attendance")
+    .select("id,full_name,employee_code,role,active,self_service_attendance,phone_clock_out")
     .eq("id", auth.user.id)
     .maybeSingle();
   if (error) throw error;
@@ -65,6 +65,7 @@ export async function getMyProfile(): Promise<Profile | null> {
     role: data.role,
     active: data.active,
     selfServiceAttendance: data.self_service_attendance,
+    phoneClockOut: data.phone_clock_out,
   };
 }
 

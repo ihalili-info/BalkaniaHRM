@@ -359,7 +359,16 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
     const [label, eventType] = actionMap[action];
     setBusyAction(action);
     try {
-      const session = await recordAttendance({ eventType, idempotencyKey: crypto.randomUUID(), source: "pwa" });
+      // A clock-out from the phone carries a location (when the phone gives
+      // one) so HR can see where the day ended. It's never required.
+      const position = action === "clockOut" ? await currentPosition() : undefined;
+      const session = await recordAttendance({
+        eventType,
+        idempotencyKey: crypto.randomUUID(),
+        source: "pwa",
+        latitude: position?.latitude,
+        longitude: position?.longitude,
+      });
       setAttendanceState(session.state);
       const events = await getTodayEvents();
       setTodayEvents(events);
@@ -380,19 +389,10 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
     const busyKey = workMode === "office" ? "clockInOffice" : "clockInRemote";
     setBusyAction(busyKey);
     try {
-      let latitude: number | undefined;
-      let longitude: number | undefined;
-      if (workMode === "office" && typeof navigator !== "undefined" && "geolocation" in navigator) {
-        try {
-          const position = await new Promise<GeolocationPosition>((resolve, reject) =>
-            navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 }),
-          );
-          latitude = position.coords.latitude;
-          longitude = position.coords.longitude;
-        } catch {
-          // Denied, timed out, or unavailable -- fall through and clock in anyway.
-        }
-      }
+      // Denied, timed out, or unavailable -- clock in anyway.
+      const position = workMode === "office" ? await currentPosition() : undefined;
+      const latitude = position?.latitude;
+      const longitude = position?.longitude;
       const session = await recordAttendance({
         eventType: "clock_in",
         idempotencyKey: crypto.randomUUID(),
@@ -491,6 +491,7 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
               <CodeScreen
                 state={attendanceState}
                 selfServiceAttendance={profile.selfServiceAttendance}
+                phoneClockOut={profile.phoneClockOut}
                 busyAction={busyAction}
                 onAction={handleAction}
                 onClockIn={handleClockIn}
@@ -907,12 +908,14 @@ function LeaveForm({
 function CodeScreen({
   state,
   selfServiceAttendance,
+  phoneClockOut,
   busyAction,
   onAction,
   onClockIn,
 }: {
   state: AttendanceState;
   selfServiceAttendance: boolean;
+  phoneClockOut: boolean;
   busyAction: AttendanceAction | "clockInOffice" | "clockInRemote" | null;
   onAction: (action: AttendanceAction) => void;
   onClockIn: (workMode: "office" | "remote") => void;
@@ -980,6 +983,18 @@ function CodeScreen({
               "Office" confirms you're near an approved location before clocking in. It's only used to flag check-ins for HR review — not for ongoing tracking.
             </p>
           )}
+        </>
+      ) : phoneClockOut ? (
+        <>
+          <div className="action-grid">
+            <Action label="🔴 Clock out" enabled={state === "working"} danger busy={busyAction === "clockOut"} onClick={() => onAction("clockOut")} />
+            <Action label="▶️ First break out" enabled={state === "on_break"} busy={busyAction === "breakOut"} onClick={() => onAction("breakOut")} />
+            <Action label="▶️ Lunch out" enabled={state === "on_lunch"} busy={busyAction === "lunchOut"} onClick={() => onAction("lunchOut")} />
+          </div>
+          <p className="muted small">
+            Clock in and start breaks at the kiosk. If you finish when the kiosk isn&apos;t reachable, clock out here; your location is saved
+            with the clock-out.
+          </p>
         </>
       ) : (
         <div className="notice">
@@ -1721,6 +1736,19 @@ function leaveTypeLabel(type: string) {
 
 function statusClass(status: string) {
   return { approved: "success", rejected: "danger", pending: "pending", cancelled: "" }[status] ?? "";
+}
+
+// Best-effort location fix; undefined when denied, timed out or unsupported.
+async function currentPosition(): Promise<{ latitude: number; longitude: number } | undefined> {
+  if (typeof navigator === "undefined" || !("geolocation" in navigator)) return undefined;
+  try {
+    const position = await new Promise<GeolocationPosition>((resolve, reject) =>
+      navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 }),
+    );
+    return { latitude: position.coords.latitude, longitude: position.coords.longitude };
+  } catch {
+    return undefined;
+  }
 }
 
 function formatDays(value: number) {

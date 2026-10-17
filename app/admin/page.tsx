@@ -147,6 +147,7 @@ import {
   setDeviceActive,
   setEmployeeActive,
   setLeaveBalance,
+  setPhoneClockOut as savePhoneClockOut,
   setLeaveEntitlement,
   setOpeningLeaveBalance,
   updateAttendanceLocation,
@@ -1164,6 +1165,7 @@ function AddEmployeeModal({
   const [attendanceLocationId, setAttendanceLocationId] = useState("");
   const [attendanceLocations, setAttendanceLocations] = useState<AdminAttendanceLocation[]>([]);
   const [selfServiceAttendance, setSelfServiceAttendance] = useState(false);
+  const [phoneClockOut, setPhoneClockOut] = useState(false);
   const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [ppsNumber, setPpsNumber] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
@@ -1208,6 +1210,10 @@ function AddEmployeeModal({
         address,
         placeOfBirth,
       });
+      if (phoneClockOut && !selfServiceAttendance) {
+        await savePhoneClockOut(employee.id, true);
+        employee.phoneClockOut = true;
+      }
       onCreated(employee);
     } catch (err) {
       setError(errorMessage(err, "Couldn't create the employee."));
@@ -1281,6 +1287,21 @@ function AddEmployeeModal({
               <small className="field-hint">Off by default — everyone else clocks in at the shared kiosk. Turn on for remote or trusted staff.</small>
             </span>
           </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={phoneClockOut || selfServiceAttendance}
+              onChange={(e) => setPhoneClockOut(e.target.checked)}
+              disabled={saving || selfServiceAttendance}
+            />
+            <span>
+              Allow clock-out from the app
+              <small className="field-hint">
+                Clock in at the kiosk, clock out from their phone, for drivers back after hours or staff who finish when the office is locked.
+                Their location is saved with the clock-out for review.
+              </small>
+            </span>
+          </label>
           <h3 className="form-section">Personal details <span className="field-optional">optional — can be completed later</span></h3>
           <label>
             PPS number
@@ -1331,6 +1352,7 @@ function EditEmployeeModal({
   const [attendanceLocationId, setAttendanceLocationId] = useState(employee.attendanceLocationId ?? "");
   const [attendanceLocations, setAttendanceLocations] = useState<AdminAttendanceLocation[]>([]);
   const [selfServiceAttendance, setSelfServiceAttendance] = useState(employee.selfServiceAttendance);
+  const [phoneClockOut, setPhoneClockOut] = useState(employee.phoneClockOut);
   const [startDate, setStartDate] = useState(employee.startDate ?? "");
   const [ppsNumber, setPpsNumber] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
@@ -1399,6 +1421,7 @@ function EditEmployeeModal({
         teamId: teamId || null,
         attendanceLocationId: attendanceLocationId || null,
         selfServiceAttendance,
+        phoneClockOut,
         startDate: startDate || undefined,
       });
       await upsertEmployeeDetails(employee.id, { ppsNumber, dateOfBirth, phoneNumber, address, placeOfBirth });
@@ -1487,6 +1510,21 @@ function EditEmployeeModal({
             <span>
               Allow self-service clock-in (skip the kiosk)
               <small className="field-hint">Off by default — everyone else clocks in at the shared kiosk.</small>
+            </span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={phoneClockOut || selfServiceAttendance}
+              onChange={(e) => setPhoneClockOut(e.target.checked)}
+              disabled={saving || selfServiceAttendance}
+            />
+            <span>
+              Allow clock-out from the app
+              <small className="field-hint">
+                Clock in at the kiosk, clock out from their phone, for drivers back after hours or staff who finish when the office is locked.
+                Their location is saved with the clock-out for review.
+              </small>
             </span>
           </label>
           <h3 className="form-section">Personal details</h3>

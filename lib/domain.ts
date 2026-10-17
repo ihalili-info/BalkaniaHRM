@@ -51,6 +51,8 @@ export interface Profile {
   role: EmployeeRole;
   active: boolean;
   selfServiceAttendance: boolean;
+  // Clock-in at the kiosk, but clock-out allowed from the app.
+  phoneClockOut: boolean;
 }
 
 export interface LeaveBalance {

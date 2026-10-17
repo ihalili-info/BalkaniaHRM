@@ -1731,7 +1731,8 @@ function roleLabel(role: string) {
 }
 
 function leaveTypeLabel(type: string) {
-  return { annual: "Annual leave", medical: "Medical / sick day", unpaid: "Unpaid leave", other: "Other" }[type] ?? type;
+  // "leave" is what who_is_on_leave_today() shows colleagues for sick leave.
+  return { annual: "Annual leave", medical: "Medical / sick day", unpaid: "Unpaid leave", other: "Other", leave: "On leave" }[type] ?? type;
 }
 
 function statusClass(status: string) {

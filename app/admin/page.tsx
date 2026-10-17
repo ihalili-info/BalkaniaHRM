@@ -3316,7 +3316,8 @@ const leaveTypeOptions: Array<[string, string]> = [
   ["other", "Other"],
 ];
 
-const leaveTypeLabel = (type: string) => leaveTypeOptions.find(([value]) => value === type)?.[1] ?? type;
+// "leave" is what who_is_on_leave_today() shows for sick leave of people outside the caller's scope.
+const leaveTypeLabel = (type: string) => leaveTypeOptions.find(([value]) => value === type)?.[1] ?? (type === "leave" ? "On leave" : type);
 
 // Days to at most 2 decimals, without trailing zeros: 17, 4.3, 11.67.
 const formatLeaveDays = (days: number) => String(Math.round(days * 100) / 100);

@@ -2361,9 +2361,51 @@ function Timesheets({ setNotice }: NoticeProps) {
 
   const hours2 = (hours: number) => Math.round(hours * 100) / 100;
 
-  // One line per day (start, end and both breaks), then a total line per
-  // person, ready to hand to payroll.
-  async function handleExport() {
+  // Horizontal: one row per person with the days running across -- for each
+  // date in the range clock in, clock out, break minutes and hours after
+  // breaks -- then the period totals.
+  function exportHorizontal(nameOf: Awaited<ReturnType<typeof loadExportNames>>) {
+    const dates: string[] = [];
+    for (let d = startDate; d <= endDate; d = addDays(d, 1)) dates.push(d);
+    const header = [
+      "Name", "Surname", "Employee code", "Team",
+      ...dates.flatMap((d) => {
+        const label = formatDate(d);
+        return [`${label} In`, `${label} Out`, `${label} Break minutes`, `${label} Hours after breaks`];
+      }),
+      "Days worked", "Total hours", "Total break minutes", "Hours after breaks", "Days without clock-out",
+    ];
+    const csvRows = summaries.map((s) => {
+      const byDate = new Map(s.rows.map((r) => [r.workDate, r]));
+      const noShowDates = new Set(noShowsOf(s.employeeId).map((shift) => shift.shiftDate));
+      return [
+        ...nameOf(s.employeeId, s.employeeName),
+        s.employeeCode,
+        teamOf(s.employeeId) ?? "",
+        ...dates.flatMap((d): Array<string | number> => {
+          const row = byDate.get(d);
+          if (!row) return noShowDates.has(d) ? ["No-show", "", "", ""] : ["", "", "", ""];
+          const day = timesheetDay(row, today);
+          return [
+            row.clockedInAt ? formatTime(row.clockedInAt) : "",
+            row.clockedOutAt ? formatTime(row.clockedOutAt) : day.missingClockOut ? "No clock-out" : "Still working",
+            Math.round((day.breakHours + day.lunchHours) * 60),
+            hours2(day.netHours),
+          ];
+        }),
+        s.days,
+        hours2(s.totalHours),
+        Math.round((s.breakHours + s.lunchHours) * 60),
+        hours2(s.netHours),
+        s.missingClockOuts,
+      ];
+    });
+    downloadCsv(`timesheet-${startDate}-to-${endDate}-horizontal.csv`, header, csvRows);
+  }
+
+  // Vertical: one line per day (start, end and both breaks), then a total line
+  // per person, ready to hand to payroll.
+  async function handleExport(layout: "vertical" | "horizontal") {
     if (!sheetRows || summaries.length === 0) {
       setNotice("No timesheet records to export for this range.");
       return;
@@ -2371,6 +2413,10 @@ function Timesheets({ setNotice }: NoticeProps) {
     setExporting(true);
     try {
       const nameOf = await loadExportNames();
+      if (layout === "horizontal") {
+        exportHorizontal(nameOf);
+        return;
+      }
       const csvRows: Array<Array<string | number>> = [];
       for (const s of summaries) {
         const person = [...nameOf(s.employeeId, s.employeeName), s.employeeCode, teamOf(s.employeeId) ?? ""];
@@ -2424,7 +2470,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         ]);
       }
       downloadCsv(
-        `timesheet-${startDate}-to-${endDate}.csv`,
+        `timesheet-${startDate}-to-${endDate}-vertical.csv`,
         [
           "Name", "Surname", "Employee code", "Team", "Date", "Rostered shift", "Clock in", "Clock out",
           "Break start", "Break end", "Break minutes", "Lunch start", "Lunch end", "Lunch minutes",
@@ -2448,8 +2494,11 @@ function Timesheets({ setNotice }: NoticeProps) {
           To
           <DateInput value={endDate} min={startDate} onChange={setEndDate} />
         </label>
-        <button className="outline-button" onClick={handleExport} disabled={exporting}>
-          <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export CSV"}
+        <button className="outline-button" onClick={() => handleExport("vertical")} disabled={exporting} title="One row per employee per day">
+          <Icon name="download" size={15} /> Export vertical
+        </button>
+        <button className="outline-button" onClick={() => handleExport("horizontal")} disabled={exporting} title="One row per employee, with the days across">
+          <Icon name="download" size={15} /> Export horizontal
         </button>
       </div>
       <div className="list-controls">

@@ -1939,9 +1939,11 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
           ...nameOf(row.employeeId, row.employeeName),
           row.employeeCode,
           teamOf(row) ?? "",
-          row.clockedInAt ?? "",
-          row.clockedOutAt ?? "",
-          row.state,
+          // Local hours:minutes, not the raw UTC timestamp with microseconds.
+          row.clockedInAt ? formatTime(row.clockedInAt) : "",
+          row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
+          // Plain words: the on-screen labels carry emoji, which Excel can garble.
+          { not_started: "Not started", working: "Working", on_break: "On break", on_lunch: "On lunch", complete: "Clocked out" }[row.state] ?? row.state,
         ]),
       );
     } finally {

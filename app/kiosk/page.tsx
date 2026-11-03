@@ -55,6 +55,11 @@ const SCAN_COOLDOWN_MS = 4000;
 // How long staff must hold the logo on the action screen to unpair the kiosk.
 const UNPAIR_HOLD_MS = 5000;
 
+// How long the scan screen waits with no activity before returning to the
+// action menu, so the next person doesn't scan into someone else's action
+// (e.g. a clock-out left selected). Every scan restarts the countdown.
+const IDLE_RETURN_SECONDS = 20;
+
 type Phase ="loading" | "pairing" | "select-action" | "scanning";
 type CameraError = "denied" | "no-camera" | null;
 
@@ -65,15 +70,20 @@ export default function KioskPage() {
   const [pairing, setPairing] = useState(false);
   const [pin, setPin] = useState("");
   const [selectedAction, setSelectedAction] = useState<AttendanceEventType | null>(null);
-  const [manualEntryOpen, setManualEntryOpen] = useState(false);
-  const [manualToken, setManualToken] = useState("");
   const [scanMessage, setScanMessage] = useState<string | null>(null);
   const [success, setSuccess] = useState<{ name: string; action: AttendanceEventType; at: Date } | null>(null);
   // One shared timer so a new result replaces the previous one cleanly instead
   // of an older timeout clearing a newer message early.
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [idleSecondsLeft, setIdleSecondsLeft] = useState(IDLE_RETURN_SECONDS);
+
+  function resetIdle() {
+    setIdleSecondsLeft(IDLE_RETURN_SECONDS);
+  }
+
   function showFeedback(next: { error: string } | { name: string; action: AttendanceEventType }) {
+    resetIdle();
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     if ("error" in next) {
       setSuccess(null);
@@ -155,6 +165,30 @@ export default function KioskPage() {
     setPhase("scanning");
   }
 
+  function returnToMenu() {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    setSuccess(null);
+    setScanMessage(null);
+    setSelectedAction(null);
+    setPhase("select-action");
+  }
+
+  // Idle countdown on the scan screen. It holds while a scan is being recorded
+  // so the result is never cut off mid-request.
+  useEffect(() => {
+    if (phase !== "scanning") return;
+    setIdleSecondsLeft(IDLE_RETURN_SECONDS);
+    const id = setInterval(() => {
+      setIdleSecondsLeft((s) => (busyRef.current ? s : Math.max(0, s - 1)));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === "scanning" && idleSecondsLeft === 0) returnToMenu();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, idleSecondsLeft]);
+
   async function handleDecoded(qrToken: string) {
     if (busyRef.current || !session || !selectedAction) return;
     // The scanner keeps decoding the same code every frame while it stays in view.
@@ -195,7 +229,6 @@ export default function KioskPage() {
       if (cancelled) return;
       if (!has) {
         setCameraError("no-camera");
-        setManualEntryOpen(true);
         return;
       }
       const scanner = new QrScanner(videoRef.current!, (result) => handleDecoded(result.data), {
@@ -218,15 +251,9 @@ export default function KioskPage() {
   }, [phase, session, selectedAction]);
 
   function retryCamera() {
+    resetIdle();
     setCameraError(null);
     scannerRef.current?.start().catch(() => setCameraError("denied"));
-  }
-
-  async function handleManualSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!manualToken.trim()) return;
-    await handleDecoded(manualToken.trim());
-    setManualToken("");
   }
 
   if (phase === "loading") {
@@ -318,11 +345,14 @@ export default function KioskPage() {
       <main className="kiosk kiosk-scanner">
         <div className="kiosk-scanner-video-wrap">
           <video ref={videoRef} className="kiosk-scanner-video" muted playsInline />
-          <button className="kiosk-mode-badge" onClick={() => setPhase("select-action")}>
+          <button className="kiosk-mode-badge" onClick={returnToMenu}>
             <Icon name={eventIcons[selectedAction].icon} size={16} />
             {eventLabels[selectedAction]}
             <Icon name="swap" size={14} className="kiosk-mode-swap" />
           </button>
+          <div className="kiosk-idle-countdown" aria-live="off">
+            Back to menu in {idleSecondsLeft}s
+          </div>
           <img src="/icon-white.png" alt="Balkania" className="kiosk-scanner-logo" />
           {!cameraError && (
             <div className="kiosk-scanner-caption">
@@ -339,7 +369,7 @@ export default function KioskPage() {
           {cameraError === "no-camera" && (
             <div className="kiosk-scanner-overlay">
               <Icon name="warning" size={32} />
-              <p>No camera was found on this device. Use the manual entry below instead.</p>
+              <p>No camera was found on this device. Connect a camera to scan QR codes.</p>
             </div>
           )}
           {/* Readable from a metre away: a full-screen confirmation the person
@@ -358,17 +388,6 @@ export default function KioskPage() {
               <span className="kiosk-result-icon"><Icon name="warning" size={44} strokeWidth={2.2} /></span>
               <p className="kiosk-result-detail">{scanMessage}</p>
             </div>
-          )}
-        </div>
-        <div className="kiosk-manual">
-          <button className="kiosk-text-button" onClick={() => setManualEntryOpen((v) => !v)}>
-            {manualEntryOpen ? "Hide manual entry" : "Enter code manually"}
-          </button>
-          {manualEntryOpen && (
-            <form onSubmit={handleManualSubmit} className="kiosk-manual-form">
-              <input value={manualToken} onChange={(e) => setManualToken(e.target.value)} placeholder="Paste attendance code" />
-              <button className="kiosk-secondary-button" type="submit">Submit</button>
-            </form>
           )}
         </div>
       </main>

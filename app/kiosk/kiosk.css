@@ -216,6 +216,20 @@
 }
 .kiosk-mode-swap { opacity: 0.6; margin-left: 2px; }
 
+/* Sits under the mode badge so it's clear the screen will reset on its own. */
+.kiosk-idle-countdown {
+  position: absolute;
+  top: 74px;
+  right: 24px;
+  background: rgba(11, 14, 33, 0.55);
+  color: var(--kiosk-muted);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 /* Mirrors the mode badge on the opposite corner so the kiosk is identifiable
    as Balkania while it sits on the scanning screen all day. */
 .kiosk-scanner-logo {
@@ -331,27 +345,6 @@
 }
 .kiosk-toast-error { background: rgba(184, 15, 57, 0.9); }
 .kiosk-toast-success { background: rgba(51, 192, 125, 0.92); color: #06301b; font-weight: 600; }
-
-.kiosk-manual {
-  padding: 12px 20px 20px;
-  background: var(--kiosk-navy);
-  text-align: center;
-}
-
-.kiosk-manual-form {
-  display: flex;
-  gap: 10px;
-  max-width: 420px;
-  margin: 0 auto;
-}
-.kiosk-manual-form input {
-  flex: 1;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(244, 245, 251, 0.2);
-  background: rgba(244, 245, 251, 0.06);
-  color: var(--kiosk-ink);
-}
 
 /* Scan result. Success fills the camera view in green so it's obvious from a
    distance; errors use a large centred card that leaves the camera visible. */

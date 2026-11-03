@@ -2146,8 +2146,8 @@ function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; o
 }
 
 // Only counts spans that both started *and* ended. A break still running is
-// deliberately excluded, matching what hoursWorked has always done -- so
-// worked + break + lunch always reconciles against the clock-in/out span.
+// deliberately excluded, so hours after breaks + break + lunch always
+// reconciles against the clock-in/out span (see timesheetDay).
 function spanHours(start: string | null, end: string | null): number {
   if (!start || !end) return 0;
   return Math.max(0, (new Date(end).getTime() - new Date(start).getTime()) / 3600000);
@@ -2161,11 +2161,26 @@ function lunchHours(row: AdminTimesheetRow): number {
   return spanHours(row.lunchStartedAt, row.lunchEndedAt);
 }
 
-function hoursWorked(row: AdminTimesheetRow): number {
-  if (!row.clockedInAt) return 0;
-  const end = row.clockedOutAt ? new Date(row.clockedOutAt) : new Date();
-  const ms = end.getTime() - new Date(row.clockedInAt).getTime();
-  return Math.max(0, ms / 3600000 - breakHours(row) - lunchHours(row));
+// One attendance day, split the way the timesheet shows it. A past day with no
+// clock-out can't be measured -- counting it up to "now" would add days of
+// hours -- so it counts as zero and is flagged. Today's open shift counts up
+// to now.
+interface TimesheetDay {
+  // Clock-in to clock-out.
+  totalHours: number;
+  breakHours: number;
+  lunchHours: number;
+  // Total minus the first break and lunch.
+  netHours: number;
+  missingClockOut: boolean;
+}
+
+function timesheetDay(row: AdminTimesheetRow, today: string): TimesheetDay {
+  const firstBreak = breakHours(row);
+  const lunch = lunchHours(row);
+  const missingClockOut = Boolean(row.clockedInAt) && !row.clockedOutAt && row.workDate < today;
+  const totalHours = missingClockOut ? 0 : spanHours(row.clockedInAt, row.clockedOutAt ?? new Date().toISOString());
+  return { totalHours, breakHours: firstBreak, lunchHours: lunch, netHours: Math.max(0, totalHours - firstBreak - lunch), missingClockOut };
 }
 
 // Breaks are usually minutes, not hours, so "17m" reads better than "0.3h".
@@ -2177,18 +2192,29 @@ function formatDurationHours(hours: number): string {
   return h ? `${h}h ${m}m` : `${m}m`;
 }
 
+// "13:00 – 13:15 (15m)"; an unfinished break shows as such.
+function formatTimeRange(start: string | null, end: string | null): string {
+  if (!start) return "—";
+  if (!end) return `${formatTime(start)} – not ended`;
+  return `${formatTime(start)} – ${formatTime(end)} (${formatDurationHours(spanHours(start, end))})`;
+}
+
 interface EmployeeTimesheetSummary {
   employeeId: string;
   employeeName: string;
   employeeCode: string;
   days: number;
-  hours: number;
+  totalHours: number;
   breakHours: number;
   lunchHours: number;
+  netHours: number;
+  missingClockOuts: number;
+  rows: AdminTimesheetRow[];
 }
 
 function Timesheets({ setNotice }: NoticeProps) {
   const now = new Date();
+  const today = toIsoDate(now);
   const [startDate, setStartDate] = useState(() => new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10));
   const [endDate, setEndDate] = useState(() => now.toISOString().slice(0, 10));
   const [rows, setRows] = useState<AdminTimesheetRow[] | null>(null);
@@ -2203,6 +2229,8 @@ function Timesheets({ setNotice }: NoticeProps) {
   const [leaveLeft, setLeaveLeft] = useState<Map<string, Map<string, number>>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  // Employee whose day-by-day breakdown is open.
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   function load() {
     setRows(null);
@@ -2244,26 +2272,27 @@ function Timesheets({ setNotice }: NoticeProps) {
   if (sheetRows) {
     const byEmployee = new Map<string, EmployeeTimesheetSummary>();
     for (const row of sheetRows) {
-      const existing = byEmployee.get(row.employeeId);
-      const hours = hoursWorked(row);
-      const breaks = breakHours(row);
-      const lunch = lunchHours(row);
-      if (existing) {
-        existing.days += 1;
-        existing.hours += hours;
-        existing.breakHours += breaks;
-        existing.lunchHours += lunch;
-      } else {
-        byEmployee.set(row.employeeId, {
-          employeeId: row.employeeId,
-          employeeName: row.employeeName,
-          employeeCode: row.employeeCode,
-          days: 1,
-          hours,
-          breakHours: breaks,
-          lunchHours: lunch,
-        });
-      }
+      const day = timesheetDay(row, today);
+      const summary = byEmployee.get(row.employeeId) ?? {
+        employeeId: row.employeeId,
+        employeeName: row.employeeName,
+        employeeCode: row.employeeCode,
+        days: 0,
+        totalHours: 0,
+        breakHours: 0,
+        lunchHours: 0,
+        netHours: 0,
+        missingClockOuts: 0,
+        rows: [],
+      };
+      summary.days += 1;
+      summary.totalHours += day.totalHours;
+      summary.breakHours += day.breakHours;
+      summary.lunchHours += day.lunchHours;
+      summary.netHours += day.netHours;
+      if (day.missingClockOut) summary.missingClockOuts += 1;
+      summary.rows.push(row);
+      byEmployee.set(row.employeeId, summary);
     }
     // Rostered people who never clocked in still need a row, or no-shows vanish.
     for (const shift of rosterShifts) {
@@ -2274,12 +2303,16 @@ function Timesheets({ setNotice }: NoticeProps) {
           employeeName: who?.name ?? "Unknown",
           employeeCode: who?.code ?? "",
           days: 0,
-          hours: 0,
+          totalHours: 0,
           breakHours: 0,
           lunchHours: 0,
+          netHours: 0,
+          missingClockOuts: 0,
+          rows: [],
         });
       }
     }
+    for (const summary of byEmployee.values()) summary.rows.sort((a, b) => a.workDate.localeCompare(b.workDate));
     summaries.push(
       ...Array.from(byEmployee.values()).sort(
         (a, b) => (sort === "team" ? compareTeams(teamOf(a.employeeId), teamOf(b.employeeId)) : 0) || a.employeeName.localeCompare(b.employeeName),
@@ -2306,13 +2339,15 @@ function Timesheets({ setNotice }: NoticeProps) {
     if (m.status === "no_show") entry.noShows += 1;
     rosterStats.set(m.shift.employeeId, entry);
   }
+  const noShowsOf = (employeeId: string) => rosterMatches.filter((m) => m.status === "no_show" && m.shift.employeeId === employeeId).map((m) => m.shift);
   const usesRoster = roster.length > 0;
   const totalScheduled = rosterMatches.reduce((sum, m) => sum + shiftHours(m.shift), 0);
   const totalLate = rosterMatches.filter((m) => m.status === "late").length;
   const totalNoShows = rosterMatches.filter((m) => m.status === "no_show").length;
-  const totalHours = summaries.reduce((sum, s) => sum + s.hours, 0);
-  const totalBreakHours = summaries.reduce((sum, s) => sum + s.breakHours, 0);
-  const totalLunchHours = summaries.reduce((sum, s) => sum + s.lunchHours, 0);
+  const totalHours = summaries.reduce((sum, s) => sum + s.totalHours, 0);
+  const totalBreaks = summaries.reduce((sum, s) => sum + s.breakHours + s.lunchHours, 0);
+  const totalNetHours = summaries.reduce((sum, s) => sum + s.netHours, 0);
+  const totalMissingClockOuts = summaries.reduce((sum, s) => sum + s.missingClockOuts, 0);
 
   function daysLeft(employeeId: string, leaveType: "annual" | "medical"): number | null {
     return leaveLeft.get(employeeId)?.get(leaveType) ?? null;
@@ -2322,44 +2357,78 @@ function Timesheets({ setNotice }: NoticeProps) {
     return left === null ? "—" : formatLeaveDays(left);
   }
 
+  const hours2 = (hours: number) => Math.round(hours * 100) / 100;
+
+  // One line per day (start, end and both breaks), then a total line per
+  // person, ready to hand to payroll.
   async function handleExport() {
-    if (!sheetRows || sheetRows.length === 0) {
+    if (!sheetRows || summaries.length === 0) {
       setNotice("No timesheet records to export for this range.");
       return;
     }
     setExporting(true);
     try {
       const nameOf = await loadExportNames();
+      const csvRows: Array<Array<string | number>> = [];
+      for (const s of summaries) {
+        const person = [...nameOf(s.employeeId, s.employeeName), s.employeeCode, teamOf(s.employeeId) ?? ""];
+        const entries = [
+          ...s.rows.map((row) => ({ date: row.workDate, row })),
+          ...noShowsOf(s.employeeId).map((shift) => ({ date: shift.shiftDate, shift })),
+        ].sort((a, b) => a.date.localeCompare(b.date));
+        for (const entry of entries) {
+          if ("shift" in entry) {
+            csvRows.push([...person, entry.date, formatShiftTime(entry.shift), "", "", "", "", 0, "", "", 0, 0, 0, 0, "", "No-show"]);
+            continue;
+          }
+          const row = entry.row;
+          const day = timesheetDay(row, today);
+          const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
+          csvRows.push([
+            ...person,
+            row.workDate,
+            match ? formatShiftTime(match.shift) : "",
+            row.clockedInAt ? formatTime(row.clockedInAt) : "",
+            row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
+            row.firstBreakStartedAt ? formatTime(row.firstBreakStartedAt) : "",
+            row.firstBreakEndedAt ? formatTime(row.firstBreakEndedAt) : "",
+            Math.round(day.breakHours * 60),
+            row.lunchStartedAt ? formatTime(row.lunchStartedAt) : "",
+            row.lunchEndedAt ? formatTime(row.lunchEndedAt) : "",
+            Math.round(day.lunchHours * 60),
+            Math.round((day.breakHours + day.lunchHours) * 60),
+            hours2(day.totalHours),
+            hours2(day.netHours),
+            match?.status === "late" ? match.lateMinutes : "",
+            day.missingClockOut ? "No clock-out: not counted" : !row.clockedOutAt ? "Still working" : "",
+          ]);
+        }
+        csvRows.push([
+          ...person,
+          "TOTAL",
+          `${s.days} day${s.days === 1 ? "" : "s"}`,
+          "", "", "", "",
+          Math.round(s.breakHours * 60),
+          "", "",
+          Math.round(s.lunchHours * 60),
+          Math.round((s.breakHours + s.lunchHours) * 60),
+          hours2(s.totalHours),
+          hours2(s.netHours),
+          "",
+          [
+            s.missingClockOuts ? `${s.missingClockOuts} day(s) without clock-out` : "",
+            `Holiday left ${daysLeft(s.employeeId, "annual") ?? "—"}, sick left ${daysLeft(s.employeeId, "medical") ?? "—"}`,
+          ].filter(Boolean).join("; "),
+        ]);
+      }
       downloadCsv(
         `timesheet-${startDate}-to-${endDate}.csv`,
-        ["Name", "Surname", "Employee code", "Team", "Date", "Rostered shift", "Clock in", "Clock out", "Worked hours", "Late minutes", "Break minutes", "Lunch minutes", "Holiday days left", "Sick days left"],
         [
-          ...sheetRows.map((row) => {
-            const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
-            return [
-              ...nameOf(row.employeeId, row.employeeName),
-              row.employeeCode,
-              teamOf(row.employeeId) ?? "",
-              row.workDate,
-              match ? formatShiftTime(match.shift) : "",
-              row.clockedInAt ? formatTime(row.clockedInAt) : "",
-              row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
-              Math.round(hoursWorked(row) * 100) / 100,
-              match?.status === "late" ? match.lateMinutes : "",
-              Math.round(breakHours(row) * 60),
-              Math.round(lunchHours(row) * 60),
-              daysLeft(row.employeeId, "annual") ?? "",
-              daysLeft(row.employeeId, "medical") ?? "",
-            ];
-          }),
-          // No-shows have no attendance row of their own.
-          ...rosterMatches
-            .filter((m) => m.status === "no_show")
-            .map((m) => {
-              const who = names.get(m.shift.employeeId);
-              return [...nameOf(m.shift.employeeId, who?.name ?? "Unknown"), who?.code ?? "", teamOf(m.shift.employeeId) ?? "", m.shift.shiftDate, formatShiftTime(m.shift), "NO-SHOW", "", 0, "", "", "", daysLeft(m.shift.employeeId, "annual") ?? "", daysLeft(m.shift.employeeId, "medical") ?? ""];
-            }),
+          "Name", "Surname", "Employee code", "Team", "Date", "Rostered shift", "Clock in", "Clock out",
+          "Break start", "Break end", "Break minutes", "Lunch start", "Lunch end", "Lunch minutes",
+          "Total break minutes", "Total hours", "Hours after breaks", "Late minutes", "Note",
         ],
+        csvRows,
       );
     } finally {
       setExporting(false);
@@ -2388,16 +2457,17 @@ function Timesheets({ setNotice }: NoticeProps) {
       </div>
       <div className="admin-stats">
         <Stat label="Employees" value={String(summaries.length)} note="In range" />
-        <Stat label="Worked hours" value={totalHours.toFixed(1)} note={summaries.length ? `${(totalHours / summaries.length).toFixed(1)} avg. per employee` : "All employees"} />
-        {usesRoster ? (
+        <Stat label="Total hours" value={formatDurationHours(totalHours)} note="Clock-in to clock-out" />
+        <Stat label="Breaks taken" value={formatDurationHours(totalBreaks)} note="First break and lunch" />
+        <Stat
+          label="Hours after breaks"
+          value={formatDurationHours(totalNetHours)}
+          note={totalMissingClockOuts ? `${totalMissingClockOuts} day${totalMissingClockOuts === 1 ? "" : "s"} without clock-out not counted` : "Total minus breaks"}
+        />
+        {usesRoster && (
           <>
             <Stat label="Scheduled hours" value={totalScheduled.toFixed(1)} note="Published roster, paid time" />
             <Stat label="Late / no-show" value={`${totalLate} / ${totalNoShows}`} note={`Late = over ${LATE_GRACE_MINUTES} min after shift start`} />
-          </>
-        ) : (
-          <>
-            <Stat label="Break time" value={formatDurationHours(totalBreakHours)} note="All employees" />
-            <Stat label="Lunch time" value={formatDurationHours(totalLunchHours)} note="All employees" />
           </>
         )}
       </div>
@@ -2410,63 +2480,116 @@ function Timesheets({ setNotice }: NoticeProps) {
       ) : (
         <section className="panel">
           <div className="panel-title"><h2>Timesheet overview</h2><span className="filter">{formatDate(startDate)} – {formatDate(endDate)}</span></div>
-          {usesRoster ? (
-            <>
-              <div className="table-head cols-9">
-                <b>Employee</b><b>Days worked</b><b>Scheduled</b><b>Worked</b><b>Late</b><b>No-shows</b><b>Breaks</b><b>Holiday left</b><b>Sick left</b>
-              </div>
-              {summaries.map((summary) => {
-                const r = rosterStats.get(summary.employeeId);
-                const team = teamOf(summary.employeeId);
-                return (
-                  <Fragment key={summary.employeeId}>
-                    {groupHeader(summary.employeeId)}
-                    <div className="table-row cols-9">
-                      <span>
-                        {summary.employeeName}
-                        <em className="asset-sub">{summary.employeeCode}{team ? ` · ${team}` : ""}</em>
-                      </span>
-                      <span>{summary.days}</span>
-                      <span>{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>
-                      <span className={r && summary.hours < r.scheduled - 0.25 ? "under-hours" : undefined}>{summary.hours.toFixed(1)}h</span>
-                      <span>{r?.late ? <span className="pill pending">{r.late}</span> : "0"}</span>
-                      <span>{r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}</span>
-                      <span>{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
-                      <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
-                      <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
-                    </div>
-                  </Fragment>
-                );
-              })}
-            </>
-          ) : (
-            <>
-              <div className="table-head cols-8">
-                <b>Employee</b><b>Employee code</b><b>Days worked</b><b>Worked</b><b>Break</b><b>Lunch</b><b>Holiday left</b><b>Sick left</b>
-              </div>
-              {summaries.map((summary) => (
-                <Fragment key={summary.employeeId}>
-                  {groupHeader(summary.employeeId)}
-                  <div className="table-row cols-8">
+          <div className={`table-head ts-cols${usesRoster ? " roster" : ""}`}>
+            <b>Employee</b>
+            <b className="ts-optional">Days</b>
+            {usesRoster && <b className="ts-optional">Scheduled</b>}
+            <b>Total hours</b>
+            <b className="ts-optional">Breaks</b>
+            <b>After breaks</b>
+            {usesRoster && <b className="ts-optional">Late / no-show</b>}
+            <b className="ts-optional">Holiday left</b>
+            <b className="ts-optional">Sick left</b>
+            <b className="actions-head">Days</b>
+          </div>
+          {summaries.map((summary) => {
+            const r = rosterStats.get(summary.employeeId);
+            const team = teamOf(summary.employeeId);
+            const isOpen = expanded === summary.employeeId;
+            const noShows = noShowsOf(summary.employeeId);
+            return (
+              <Fragment key={summary.employeeId}>
+                {groupHeader(summary.employeeId)}
+                <div className="timesheet-person">
+                  <div className={`table-row ts-cols${usesRoster ? " roster" : ""}`}>
                     <span>
                       {summary.employeeName}
-                      {teamOf(summary.employeeId) && <em className="asset-sub">{teamOf(summary.employeeId)}</em>}
+                      <em className="asset-sub">{summary.employeeCode}{team ? ` · ${team}` : ""}</em>
                     </span>
-                    <span>{summary.employeeCode}</span>
-                    <span>{summary.days}</span>
-                    <span>{summary.hours.toFixed(1)}h</span>
-                    <span>{formatDurationHours(summary.breakHours)}</span>
-                    <span>{formatDurationHours(summary.lunchHours)}</span>
-                    <span>{formatDaysLeft(summary.employeeId, "annual")}</span>
-                    <span>{formatDaysLeft(summary.employeeId, "medical")}</span>
+                    <span className="ts-optional">{summary.days}</span>
+                    {usesRoster && <span className="ts-optional">{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>}
+                    <span>{formatDurationHours(summary.totalHours)}</span>
+                    <span className="ts-optional">{formatDurationHours(summary.breakHours + summary.lunchHours)}</span>
+                    <span>
+                      <b className={r && summary.netHours < r.scheduled - 0.25 ? "under-hours" : undefined}>{formatDurationHours(summary.netHours)}</b>
+                      {summary.missingClockOuts > 0 && (
+                        <em className="asset-sub under-hours">{summary.missingClockOuts} without clock-out</em>
+                      )}
+                    </span>
+                    {usesRoster && (
+                      <span className="ts-optional">
+                        {r?.late ? <span className="pill pending">{r.late}</span> : "0"} / {r?.noShows ? <span className="pill danger">{r.noShows}</span> : "0"}
+                      </span>
+                    )}
+                    <span className="ts-optional">{formatDaysLeft(summary.employeeId, "annual")}</span>
+                    <span className="ts-optional">{formatDaysLeft(summary.employeeId, "medical")}</span>
+                    <span className="row-actions">
+                      {(summary.rows.length > 0 || noShows.length > 0) && (
+                        <button
+                          className="icon-action"
+                          onClick={() => setExpanded(isOpen ? null : summary.employeeId)}
+                          aria-expanded={isOpen}
+                          aria-label={`${isOpen ? "Hide" : "Show"} ${summary.employeeName}'s days`}
+                          title={isOpen ? "Hide days" : "Show each day"}
+                        >
+                          <Icon name="chevronRight" size={15} className={isOpen ? "rotate-90" : undefined} />
+                        </button>
+                      )}
+                    </span>
                   </div>
-                </Fragment>
-              ))}
-            </>
-          )}
+                  {isOpen && <TimesheetDays rows={summary.rows} noShows={noShows} today={today} />}
+                </div>
+              </Fragment>
+            );
+          })}
         </section>
       )}
     </>
+  );
+}
+
+// Day-by-day breakdown for one person: when they worked, both breaks, and
+// the hours before and after breaks.
+function TimesheetDays({ rows, noShows, today }: { rows: AdminTimesheetRow[]; noShows: RosterShift[]; today: string }) {
+  const entries = [
+    ...rows.map((row) => ({ date: row.workDate, row, shift: null as RosterShift | null })),
+    ...noShows.map((shift) => ({ date: shift.shiftDate, row: null as AdminTimesheetRow | null, shift })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+
+  return (
+    <div className="timesheet-days">
+      <div className="timesheet-day head">
+        <b>Date</b><b>Worked</b><b>First break</b><b>Lunch</b><b>Total</b><b>Breaks</b><b>After breaks</b>
+      </div>
+      {entries.map(({ date, row, shift }) => {
+        if (!row) {
+          return (
+            <div className="timesheet-day" key={`no-show-${shift!.id}`}>
+              <span>{formatDate(date)}</span>
+              <span><span className="pill danger">No-show</span></span>
+              <span className="muted">Rostered {formatShiftTime(shift!)}</span>
+              <span />
+              <span>—</span><span>—</span><span>—</span>
+            </div>
+          );
+        }
+        const day = timesheetDay(row, today);
+        return (
+          <div className="timesheet-day" key={`${row.employeeId}-${row.workDate}`}>
+            <span>{formatDate(date)}</span>
+            <span>
+              {row.clockedInAt ? formatTime(row.clockedInAt) : "—"} –{" "}
+              {row.clockedOutAt ? formatTime(row.clockedOutAt) : day.missingClockOut ? <span className="pill danger">No clock-out</span> : "still working"}
+            </span>
+            <span>{formatTimeRange(row.firstBreakStartedAt, row.firstBreakEndedAt)}</span>
+            <span>{formatTimeRange(row.lunchStartedAt, row.lunchEndedAt)}</span>
+            <span>{formatDurationHours(day.totalHours)}</span>
+            <span>{formatDurationHours(day.breakHours + day.lunchHours)}</span>
+            <span><b>{formatDurationHours(day.netHours)}</b></span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

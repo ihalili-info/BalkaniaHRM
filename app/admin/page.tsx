@@ -2439,12 +2439,7 @@ function Timesheets({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <div className="toolbar">
-        <button className="outline-button" onClick={handleExport} disabled={exporting}>
-          <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export CSV"}
-        </button>
-      </div>
-      <div className="timesheet-range">
+      <div className="timesheet-range timesheet-controls">
         <label>
           From
           <DateInput value={startDate} max={endDate} onChange={setStartDate} />
@@ -2453,6 +2448,9 @@ function Timesheets({ setNotice }: NoticeProps) {
           To
           <DateInput value={endDate} min={startDate} onChange={setEndDate} />
         </label>
+        <button className="outline-button" onClick={handleExport} disabled={exporting}>
+          <Icon name="download" size={15} /> {exporting ? "Exporting…" : "Export CSV"}
+        </button>
       </div>
       <div className="list-controls">
         <TeamControls teams={teams} team={teamFilter} onTeam={setTeamFilter} sort={sort} onSort={(v) => setSort(v as TeamSort)} />

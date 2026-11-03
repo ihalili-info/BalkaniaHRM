@@ -118,6 +118,14 @@
 
 .timesheet-range { display: flex; flex-wrap: wrap; gap: 16px; margin: -10px 0 22px; }
 .timesheet-range label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 600; color: var(--muted); }
+/* Timesheets: From, To and Export side by side on one line. */
+.timesheet-controls { flex-wrap: nowrap; align-items: flex-end; margin-top: 22px; }
+.timesheet-controls label { flex: 0 0 190px; }
+.timesheet-controls .outline-button { flex: 0 0 auto; }
+@media (max-width: 520px) {
+  .timesheet-controls { flex-wrap: wrap; }
+  .timesheet-controls label { flex: 1 1 140px; }
+}
 .timesheet-range input { padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); font: inherit; font-size: 13.5px; color: var(--ink); }
 .range-presets { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; }
 .range-presets .outline-button { padding: 8px 12px; font-size: 12.5px; }

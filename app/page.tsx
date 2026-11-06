@@ -27,6 +27,8 @@ import { recordAttendance } from "../lib/attendance-service";
 import {
   getLeaveBalances,
   getLeaveRequests,
+  cancelMyLeaveRequest,
+  changeMyLeaveDates,
   getMonthSessions,
   getMyDisciplinaryNotes,
   getMyProfile,
@@ -435,6 +437,26 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
     }
   }
 
+  // Both can change the balance (an approved request hands its days back), so
+  // refresh it along with the list. Errors go back to the caller to show inline.
+  async function refreshLeave() {
+    const [balances, requests] = await Promise.all([getLeaveBalances(), getLeaveRequests()]);
+    setLeaveBalances(balances);
+    setLeaveRequests(requests);
+  }
+
+  async function handleLeaveCancel(request: LeaveRequestRecord) {
+    await cancelMyLeaveRequest(request.id);
+    await refreshLeave();
+    setNotice(request.status === "approved" ? "Leave cancelled. The days are back in your balance." : "Leave request cancelled.");
+  }
+
+  async function handleLeaveChange(request: LeaveRequestRecord, startsOn: string, endsOn: string, note: string) {
+    await changeMyLeaveDates(request.id, startsOn, endsOn, note);
+    await refreshLeave();
+    setNotice("New dates sent for approval.");
+  }
+
   async function handleCertificateUpload(requestId: string, file: File) {
     try {
       await uploadMedicalCertificate(profile.id, requestId, file);
@@ -485,6 +507,8 @@ function AppShell({ profile, configured }: { profile: Profile; configured: boole
                 sickStatus={sickStatus}
                 onSubmit={handleLeaveSubmit}
                 onUploadCertificate={handleCertificateUpload}
+                onCancelLeave={handleLeaveCancel}
+                onChangeLeave={handleLeaveChange}
               />
             )}
             {screen === "code" && (
@@ -638,6 +662,8 @@ function LeavesScreen({
   sickStatus,
   onSubmit,
   onUploadCertificate,
+  onCancelLeave,
+  onChangeLeave,
 }: {
   profile: Profile;
   balances: LeaveBalance[];
@@ -645,10 +671,38 @@ function LeavesScreen({
   sickStatus: SickLeaveStatus | null;
   onSubmit: (input: Parameters<typeof submitLeaveRequest>[0], certificate: File | null) => Promise<void>;
   onUploadCertificate: (requestId: string, file: File) => Promise<void>;
+  onCancelLeave: (request: LeaveRequestRecord) => Promise<void>;
+  onChangeLeave: (request: LeaveRequestRecord, startsOn: string, endsOn: string, note: string) => Promise<void>;
 }) {
   const [tab, setTab] = useState<"mine" | "team">("mine");
   const [openForm, setOpenForm] = useState(false);
   const [uploadingId, setUploadingId] = useState<string | null>(null);
+  const [changing, setChanging] = useState<LeaveRequestRecord | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const today = toIsoDate(new Date());
+
+  // Annual leave that hasn't started yet can be cancelled or moved by the
+  // employee; the server checks the same rules.
+  const canChange = (request: LeaveRequestRecord) =>
+    request.leaveType === "annual" && (request.status === "pending" || request.status === "approved") && request.startsOn > today;
+
+  async function cancelLeave(request: LeaveRequestRecord) {
+    const message =
+      request.status === "approved"
+        ? `Cancel your annual leave ${formatDate(request.startsOn)} – ${formatDate(request.endsOn)}? The days go back into your balance.`
+        : `Withdraw your leave request for ${formatDate(request.startsOn)} – ${formatDate(request.endsOn)}?`;
+    if (!window.confirm(message)) return;
+    setCancellingId(request.id);
+    setListError(null);
+    try {
+      await onCancelLeave(request);
+    } catch (err) {
+      setListError(errorMessage(err, "Couldn't cancel the leave."));
+    } finally {
+      setCancellingId(null);
+    }
+  }
   const isManager = isAdminPortalRole(profile.role);
   const annual = balances.find((b) => b.leaveType === "annual");
   const available = annual ? annual.earned - annual.used : 0;
@@ -675,9 +729,12 @@ function LeavesScreen({
         <>
           <section className="card balance">
             <p className="eyebrow">AVAILABLE TO BOOK</p>
-            <strong>
+            <strong className={available < 0 ? "negative" : undefined}>
               {annual ? formatDays(available) : "0"} <small>days</small>
             </strong>
+            {annual && available < 0 && (
+              <p className="small">You&apos;ve booked {formatDays(-available)} days more than you&apos;ve built up so far. They&apos;re made up as your allowance is added each month.</p>
+            )}
             {annual ? (
               <>
                 {/* "earned" can include a balance carried in when HR imported staff, so
@@ -715,6 +772,7 @@ function LeavesScreen({
           {requests.length ? (
             <section className="card">
               <h2>Requests</h2>
+              {listError && <p className="form-error"><Icon name="warning" size={15} />{listError}</p>}
               <ul className="leave-list">
                 {requests.map((request) => (
                   <li key={request.id}>
@@ -742,6 +800,16 @@ function LeavesScreen({
                             />
                           </label>
                         ))}
+                      {canChange(request) && (
+                        <span className="leave-actions">
+                          <button className="text-button" onClick={() => setChanging(request)} disabled={cancellingId === request.id}>
+                            Change dates
+                          </button>
+                          <button className="text-button danger" onClick={() => cancelLeave(request)} disabled={cancellingId === request.id}>
+                            {cancellingId === request.id ? "Cancelling…" : "Cancel"}
+                          </button>
+                        </span>
+                      )}
                     </div>
                     <span className={`pill ${statusClass(request.status)}`}>{request.status}</span>
                   </li>
@@ -768,17 +836,122 @@ function LeavesScreen({
         </section>
       )}
 
-      {openForm && <LeaveForm profileId={profile.id} onCancel={() => setOpenForm(false)} onSubmit={onSubmit} />}
+      {openForm && (
+        <LeaveForm profileId={profile.id} annualAvailable={annual ? available : null} onCancel={() => setOpenForm(false)} onSubmit={onSubmit} />
+      )}
+      {changing && (
+        <ChangeLeaveDatesForm
+          request={changing}
+          // The original's days come back when it's swapped, so count them as available.
+          annualAvailable={annual ? available + (changing.status === "approved" ? weekdaysBetween(changing.startsOn, changing.endsOn) : 0) : null}
+          onClose={() => setChanging(null)}
+          onSave={(startsOn, endsOn, note) => onChangeLeave(changing, startsOn, endsOn, note)}
+        />
+      )}
     </>
+  );
+}
+
+// Weekdays from start to end inclusive. Bank holidays are left in, so it's an
+// upper bound on what the server will charge -- fine for a warning.
+function weekdaysBetween(startsOn: string, endsOn: string): number {
+  let count = 0;
+  for (let d = new Date(`${startsOn}T00:00:00`); toIsoDate(d) <= endsOn; d.setDate(d.getDate() + 1)) {
+    const day = d.getDay();
+    if (day !== 0 && day !== 6) count += 1;
+  }
+  return count;
+}
+
+// Annual leave beyond the balance is allowed, but HR has to approve it.
+function NegativeBalanceWarning({ startsOn, endsOn, available }: { startsOn: string; endsOn: string; available: number | null }) {
+  if (available === null || !startsOn || !endsOn || endsOn < startsOn) return null;
+  const days = weekdaysBetween(startsOn, endsOn);
+  if (days <= available) return null;
+  return (
+    <div className="form-warning">
+      <Icon name="warning" size={15} />
+      <p>
+        This is up to {days} working days, but you have {formatDays(available)} available, so it would take your balance to about{" "}
+        <b>{formatDays(available - days)} days</b>. You can still send it, but only HR can approve leave that goes below zero.
+      </p>
+    </div>
+  );
+}
+
+function ChangeLeaveDatesForm({
+  request,
+  annualAvailable,
+  onClose,
+  onSave,
+}: {
+  request: LeaveRequestRecord;
+  annualAvailable: number | null;
+  onClose: () => void;
+  onSave: (startsOn: string, endsOn: string, note: string) => Promise<void>;
+}) {
+  const [startsOn, setStartsOn] = useState(request.startsOn);
+  const [endsOn, setEndsOn] = useState(request.endsOn);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (!startsOn || !endsOn) return setError("Choose a start and end date.");
+    if (endsOn < startsOn) return setError("The end date must be on or after the start date.");
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(startsOn, endsOn, note);
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't change the dates."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal">
+      <div className="modal-card">
+        <h2>Change leave dates</h2>
+        <p className="muted small">
+          Currently {formatDate(request.startsOn)} – {formatDate(request.endsOn)}.{" "}
+          {request.status === "approved"
+            ? "This leave is approved; the new dates need approving again, and until then the original days go back into your balance."
+            : "The new dates go to your manager for approval."}
+        </p>
+        <label>
+          Start date
+          <DateInput required value={startsOn} onChange={setStartsOn} />
+        </label>
+        <label>
+          End date
+          <DateInput required value={endsOn} onChange={setEndsOn} />
+        </label>
+        <label>
+          Note
+          <textarea placeholder="Optional note for your manager" value={note} onChange={(e) => setNote(e.target.value)} />
+        </label>
+        <NegativeBalanceWarning startsOn={startsOn} endsOn={endsOn} available={annualAvailable} />
+        {error && <p className="form-error"><Icon name="warning" size={15} />{error}</p>}
+        <button className="primary-button" onClick={save} disabled={saving}>
+          {saving ? "Sending…" : "Send new dates for approval"}
+        </button>
+        <button className="text-button" onClick={onClose}>Keep current dates</button>
+      </div>
+    </div>
   );
 }
 
 function LeaveForm({
   profileId,
+  annualAvailable,
   onCancel,
   onSubmit,
 }: {
   profileId: string;
+  annualAvailable: number | null;
   onCancel: () => void;
   onSubmit: (input: Parameters<typeof submitLeaveRequest>[0], certificate: File | null) => Promise<void>;
 }) {
@@ -889,6 +1062,7 @@ function LeaveForm({
             </small>
           )
         )}
+        {kind === "annual" && <NegativeBalanceWarning startsOn={startsOn} endsOn={endsOn} available={annualAvailable} />}
         {error && <p className="form-error"><Icon name="warning" size={15} />{error}</p>}
         {sickBlocked ? (
           <button className="primary-button" onClick={() => submit("unpaid")} disabled={submitting}>

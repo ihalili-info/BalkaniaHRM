@@ -209,6 +209,10 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 
 .balance > strong { display: block; font-size: 52px; font-weight: 700; color: var(--brand); margin: 6px 0; letter-spacing: -1px; }
 .balance small { font-size: 18px; color: var(--muted); font-weight: 500; }
+.balance > strong.negative { color: var(--danger); }
+.leave-actions { display: flex; gap: 14px; margin-top: 4px; }
+.leave-actions .text-button { padding: 2px 0; font-size: 13px; }
+.text-button.danger { color: var(--danger); }
 .progress { height: 10px; border-radius: var(--radius-pill); background: #e9ebf3; overflow: hidden; }
 .progress span { display: block; height: 100%; background: var(--brand); border-radius: var(--radius-pill); }
 .legend { margin-top: 10px; font-size: 12.5px; color: var(--muted); }

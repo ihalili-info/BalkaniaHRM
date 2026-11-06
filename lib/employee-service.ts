@@ -202,3 +202,23 @@ export async function submitLeaveRequest(input: LeaveRequestInput): Promise<Leav
     medicalCertificatePath: data.medical_certificate_path,
   };
 }
+
+// Own annual leave that hasn't started yet, pending or approved
+// (20261025_negative_annual_leave_and_self_service_changes.sql). An approved
+// request's days go back to the balance.
+export async function cancelMyLeaveRequest(requestId: string): Promise<void> {
+  const { error } = await client().rpc("cancel_leave_request", { p_request_id: requestId, p_reason: null });
+  if (error) throw error;
+}
+
+// Cancels the original and files a new pending request for the new dates, so
+// it needs approving again even if the original was approved.
+export async function changeMyLeaveDates(requestId: string, startsOn: string, endsOn: string, note?: string): Promise<void> {
+  const { error } = await client().rpc("change_leave_request_dates", {
+    p_request_id: requestId,
+    p_starts_on: startsOn,
+    p_ends_on: endsOn,
+    p_note: note?.trim() || null,
+  });
+  if (error) throw error;
+}

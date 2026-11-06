@@ -608,6 +608,15 @@ export async function listLeaveBalances(): Promise<AdminLeaveBalance[]> {
   }));
 }
 
+// Annual leave available to book today, per employee, so pending requests
+// that would go below zero can be flagged (only HR can approve those --
+// 20261025_negative_annual_leave_and_self_service_changes.sql).
+export async function listAnnualLeaveAvailable(): Promise<Map<string, number>> {
+  const { data, error } = await client().from("leave_balances_current").select("employee_id,earned,used").eq("leave_type", "annual");
+  if (error) throw error;
+  return new Map((data ?? []).map((row) => [row.employee_id as string, Number(row.earned) - Number(row.used)]));
+}
+
 export interface SetLeaveEntitlementInput {
   employeeId: string;
   leaveType: string;

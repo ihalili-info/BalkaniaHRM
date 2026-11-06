@@ -526,8 +526,11 @@ export async function removeDayOff(id: string): Promise<void> {
 
 // Books approved leave for someone the caller supervises; their shifts and
 // days off in the range are removed server-side. See 20261016_roster_leave_awareness.sql.
-export async function recordLeaveForEmployee(employeeId: string, leaveType: string, startsOn: string, endsOn: string, note: string): Promise<void> {
-  const { error } = await client().rpc("record_leave_for_employee", {
+// Returns the request's status: "approved" when booked straight away, or
+// "pending" for sick leave (needs a certificate) and for annual leave a
+// manager records below zero (needs HR).
+export async function recordLeaveForEmployee(employeeId: string, leaveType: string, startsOn: string, endsOn: string, note: string): Promise<string> {
+  const { data, error } = await client().rpc("record_leave_for_employee", {
     p_employee_id: employeeId,
     p_leave_type: leaveType,
     p_starts_on: startsOn,
@@ -535,6 +538,7 @@ export async function recordLeaveForEmployee(employeeId: string, leaveType: stri
     p_note: note,
   });
   if (error) throw error;
+  return (data as { status?: string } | null)?.status ?? "approved";
 }
 
 // ---- attendance vs roster ----

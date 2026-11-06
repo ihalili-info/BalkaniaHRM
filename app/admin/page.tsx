@@ -141,6 +141,7 @@ import {
   registerDevice,
   returnAsset,
   reviewLeaveRequest,
+  listAnnualLeaveAvailable,
   seedBankHolidays,
   sendPasswordReset,
   setAssetRetired,
@@ -3330,14 +3331,29 @@ function LeaveRequests({
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [myBalance, setMyBalance] = useState<LeaveBalance | null>(null);
   const [myRequests, setMyRequests] = useState<LeaveRequestRecord[] | null>(null);
+  const [annualAvailable, setAnnualAvailable] = useState<Map<string, number>>(new Map());
 
   async function load() {
     try {
-      const data = await listPendingLeaveRequests();
+      const [data, available] = await Promise.all([
+        listPendingLeaveRequests(),
+        // Only used to flag requests that go below zero; the list works without it.
+        listAnnualLeaveAvailable().catch(() => new Map<string, number>()),
+      ]);
       setRows(data);
+      setAnnualAvailable(available);
     } catch (err) {
       setError(errorMessage(err, "Couldn't load leave requests."));
     }
+  }
+
+  // Balance after approving this annual request, if that's below zero.
+  function balanceAfter(row: AdminLeaveRequest): number | null {
+    if (row.leaveType !== "annual") return null;
+    const available = annualAvailable.get(row.employeeId);
+    if (available === undefined) return null;
+    const after = available - row.workingDays;
+    return after < 0 ? after : null;
   }
 
   async function loadMine() {
@@ -3423,10 +3439,19 @@ function LeaveRequests({
           <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b className="actions-head">Actions</b></div>
           {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => {
             const isOwnRequest = !isHrAdmin && row.employeeId === currentUserId;
+            const after = balanceAfter(row);
+            const needsHr = after !== null && !isHrAdmin;
             return (
               <div className="table-row" key={row.id}>
                 <span>{row.employeeName}</span>
-                <span>{leaveTypeLabel(row.leaveType)}</span>
+                <span className="leave-type-cell">
+                  {leaveTypeLabel(row.leaveType)}
+                  {after !== null && (
+                    <span className="pill danger" title="Approving this takes their annual leave below zero. Only HR can approve it.">
+                      Balance after: {formatLeaveDays(after)}
+                    </span>
+                  )}
+                </span>
                 <span>{formatDate(row.startsOn)} – {formatDate(row.endsOn)}</span>
                 {isOwnRequest ? (
                   <span className="row-actions">
@@ -3454,10 +3479,16 @@ function LeaveRequests({
                     )}
                     <button
                       className="icon-action approve"
-                      disabled={busyId === row.id || (row.leaveType === "medical" && !row.medicalCertificatePath)}
+                      disabled={busyId === row.id || (row.leaveType === "medical" && !row.medicalCertificatePath) || needsHr}
                       onClick={() => decide(row.id, "approved")}
                       aria-label="Approve"
-                      title={row.leaveType === "medical" && !row.medicalCertificatePath ? "Needs a medical certificate before it can be approved" : "Approve"}
+                      title={
+                        row.leaveType === "medical" && !row.medicalCertificatePath
+                          ? "Needs a medical certificate before it can be approved"
+                          : needsHr
+                            ? "Takes their annual leave below zero, so only HR can approve it"
+                            : "Approve"
+                      }
                     >
                       <Icon name="check" size={15} />
                     </button>
@@ -3688,7 +3719,8 @@ function SetEntitlementModal({
     // What earned - used already gives. It can be negative (someone who took
     // more than they'd earned); leaving it untouched must still save.
     const implied = existing ? Number(formatLeaveDays(existing.earned - usedValue)) : null;
-    if (remainingValue !== null && (!Number.isFinite(remainingValue) || (remainingValue < 0 && remainingValue !== implied))) {
+    // Annual leave may go below zero (HR's call); other types can't.
+    if (remainingValue !== null && (!Number.isFinite(remainingValue) || (remainingValue < 0 && leaveType !== "annual" && remainingValue !== implied))) {
       setError("Remaining days must be zero or more.");
       return;
     }
@@ -3774,6 +3806,7 @@ function SetEntitlementModal({
               <input type="number" step="0.01" value={remaining} onChange={(e) => setRemaining(e.target.value)} disabled={saving} />
               <small className="field-hint">
                 What they can still book right now, e.g. carried over from your old records. Monthly accrual continues on top of it.
+                {leaveType === "annual" && " Annual leave can be set below zero, e.g. -2 for days taken in advance."}
               </small>
             </label>
           )}
@@ -4839,9 +4872,12 @@ function RosterDayModal({
     } else {
       if (!leaveEnds || leaveEnds < date) return setError("The last day must be on or after the first.");
       save(async () => {
-        await recordLeaveForEmployee(employee.id, leaveType, date, leaveEnds, note);
-        return leaveType === "medical"
-          ? `Sick leave recorded for ${employee.fullName}. It stays pending until their medical certificate is uploaded and it's approved.`
+        const status = await recordLeaveForEmployee(employee.id, leaveType, date, leaveEnds, note);
+        if (leaveType === "medical") {
+          return `Sick leave recorded for ${employee.fullName}. It stays pending until their medical certificate is uploaded and it's approved.`;
+        }
+        return status === "pending"
+          ? `${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName}, but it takes their balance below zero, so it's waiting for HR to approve.`
           : `${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName}.`;
       });
     }

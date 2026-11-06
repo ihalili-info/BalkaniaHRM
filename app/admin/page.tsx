@@ -1933,18 +1933,34 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
       const nameOf = await loadExportNames();
       downloadCsv(
         `attendance-${fromDate}${singleDay ? "" : `-to-${toDate}`}.csv`,
-        ["Date", "Name", "Surname", "Employee code", "Team", "Clock in", "Clock out", "Status"],
-        visible.map((row) => [
-          row.workDate,
-          ...nameOf(row.employeeId, row.employeeName),
-          row.employeeCode,
-          teamOf(row) ?? "",
+        [
+          "Date", "Name", "Surname", "Employee code", "Team", "Clock in",
+          "Break start", "Break end", "Break minutes", "Lunch start", "Lunch end", "Lunch minutes", "Total break minutes",
+          "Clock out", "Status",
+        ],
+        visible.map((row) => {
           // Local hours:minutes, not the raw UTC timestamp with microseconds.
-          row.clockedInAt ? formatTime(row.clockedInAt) : "",
-          row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
-          // Plain words: the on-screen labels carry emoji, which Excel can garble.
-          { not_started: "Not started", working: "Working", on_break: "On break", on_lunch: "On lunch", complete: "Clocked out" }[row.state] ?? row.state,
-        ]),
+          const time = (value: string | null) => (value ? formatTime(value) : "");
+          const breakMinutes = Math.round(spanHours(row.firstBreakStartedAt, row.firstBreakEndedAt) * 60);
+          const lunchMinutes = Math.round(spanHours(row.lunchStartedAt, row.lunchEndedAt) * 60);
+          return [
+            row.workDate,
+            ...nameOf(row.employeeId, row.employeeName),
+            row.employeeCode,
+            teamOf(row) ?? "",
+            time(row.clockedInAt),
+            time(row.firstBreakStartedAt),
+            time(row.firstBreakEndedAt),
+            row.firstBreakEndedAt ? String(breakMinutes) : "",
+            time(row.lunchStartedAt),
+            time(row.lunchEndedAt),
+            row.lunchEndedAt ? String(lunchMinutes) : "",
+            String(breakMinutes + lunchMinutes),
+            time(row.clockedOutAt),
+            // Plain words: the on-screen labels carry emoji, which Excel can garble.
+            { not_started: "Not started", working: "Working", on_break: "On break", on_lunch: "On lunch", complete: "Clocked out" }[row.state] ?? row.state,
+          ];
+        }),
       );
     } finally {
       setExporting(false);
@@ -2038,8 +2054,8 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
       ) : (
         <section className="panel">
           <div className="panel-title"><h2>Attendance records</h2><span className="filter">{rangeLabel}</span></div>
-          <div className={`table-head ${singleDay ? "cols-5" : "cols-6"}`}>
-            <b>Employee</b>{!singleDay && <b>Date</b>}<b>Team</b><b>Clock in</b><b>Clock out</b><b>Status</b>
+          <div className={`table-head attendance-cols${singleDay ? "" : " with-date"}`}>
+            <b>Employee</b>{!singleDay && <b>Date</b>}<b>Team</b><b>Clock in</b><b>Break</b><b>Lunch</b><b>Clock out</b><b>Status</b>
           </div>
           {visible.map((row) => {
             const team = teamOf(row);
@@ -2048,11 +2064,13 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
             return (
               <Fragment key={row.id}>
                 {header}
-                <div className={`table-row ${singleDay ? "cols-5" : "cols-6"}`}>
+                <div className={`table-row attendance-cols${singleDay ? "" : " with-date"}`}>
                   <span>{row.employeeName}</span>
                   {!singleDay && <span>{formatDate(row.workDate)}</span>}
                   <span className="muted">{team ?? "—"}</span>
                   <span>{row.clockedInAt ? formatTime(row.clockedInAt) : "--:--"}</span>
+                  <BreakSpanCell start={row.firstBreakStartedAt} end={row.firstBreakEndedAt} live={row.state === "on_break"} liveLabel="On break" />
+                  <BreakSpanCell start={row.lunchStartedAt} end={row.lunchEndedAt} live={row.state === "on_lunch"} liveLabel="At lunch" />
                   <span>{row.clockedOutAt ? formatTime(row.clockedOutAt) : "--:--"}</span>
                   <span className="row-actions">
                     <span className={`pill ${row.state === "complete" ? "success" : row.state === "not_started" ? "" : "pending"}`}>{stateLabel(row.state)}</span>
@@ -2066,6 +2084,22 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
         </section>
       )}
     </>
+  );
+}
+
+// Break/lunch out and back in on one line, with how long it took underneath.
+// A break still running shows when it started and that the person is still out.
+function BreakSpanCell({ start, end, live, liveLabel }: { start: string | null; end: string | null; live: boolean; liveLabel: string }) {
+  if (!start) return <span className="muted">—</span>;
+  return (
+    <span className="break-span">
+      <span>{formatTime(start)} – {end ? formatTime(end) : "--:--"}</span>
+      {end ? (
+        <small className="muted">{formatDurationHours(spanHours(start, end))}</small>
+      ) : (
+        <small className={live ? "break-live" : "muted"}>{live ? liveLabel : "Not ended"}</small>
+      )}
+    </span>
   );
 }
 

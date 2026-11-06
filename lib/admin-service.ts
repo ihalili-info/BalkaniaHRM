@@ -648,6 +648,10 @@ export interface AdminAttendanceSession {
   state: string;
   clockedInAt: string | null;
   clockedOutAt: string | null;
+  firstBreakStartedAt: string | null;
+  firstBreakEndedAt: string | null;
+  lunchStartedAt: string | null;
+  lunchEndedAt: string | null;
   employeeName: string;
   employeeCode: string;
   locationStatus: string | null;
@@ -659,7 +663,7 @@ export async function listAttendanceSessions(workDate: string, toDate: string = 
     client()
       .from("attendance_sessions")
       .select(
-        "id,employee_id,work_date,state,clocked_in_at,clocked_out_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
+        "id,employee_id,work_date,state,clocked_in_at,clocked_out_at,first_break_started_at,first_break_ended_at,lunch_started_at,lunch_ended_at,clock_in_location_status,profiles!attendance_sessions_employee_id_fkey(full_name,employee_code)",
       )
       .gte("work_date", workDate)
       .lte("work_date", toDate)
@@ -677,6 +681,10 @@ export async function listAttendanceSessions(workDate: string, toDate: string = 
       state: row.state,
       clockedInAt: row.clocked_in_at,
       clockedOutAt: row.clocked_out_at,
+      firstBreakStartedAt: row.first_break_started_at,
+      firstBreakEndedAt: row.first_break_ended_at,
+      lunchStartedAt: row.lunch_started_at,
+      lunchEndedAt: row.lunch_ended_at,
       employeeName: profile?.full_name ?? "Unknown",
       employeeCode: profile?.employee_code ?? "",
       locationStatus: row.clock_in_location_status,

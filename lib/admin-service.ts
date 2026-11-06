@@ -220,9 +220,11 @@ export async function updateEmployee(input: UpdateEmployeeInput): Promise<AdminE
 
 // Lets someone clock out from the app while still clocking in at the kiosk
 // (20261022_phone_clock_out.sql). Separate from createEmployee so the
-// create-employee Edge Function doesn't need redeploying for it.
+// create-employee Edge Function doesn't need redeploying for it. Goes through
+// an RPC so managers can set it for their reports without broader profile
+// write access (20261024_manager_phone_clock_out.sql).
 export async function setPhoneClockOut(employeeId: string, enabled: boolean): Promise<void> {
-  const { error } = await client().from("profiles").update({ phone_clock_out: enabled }).eq("id", employeeId);
+  const { error } = await client().rpc("set_phone_clock_out", { p_employee_id: employeeId, p_enabled: enabled });
   if (error) throw error;
 }
 

@@ -503,7 +503,7 @@ function AdminShell({ profile }: { profile: Profile }) {
           <EmptyPanel icon="building" title="Organization" note="Company structure, branches, and departments will live here." />
         )}
         {module === "employees" && (
-          <Employees setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />
+          <Employees setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} isManager={profile.role === "manager"} currentUserId={profile.id} />
         )}
         {module === "teams" && <Teams setNotice={setNotice} />}
         {module === "documents" && (
@@ -676,7 +676,7 @@ function Dashboard({ onNavigate }: { onNavigate: (module: Module) => void }) {
   );
 }
 
-function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticeProps & { isHrAdmin: boolean; isManager: boolean; currentUserId: string }) {
   const [rows, setRows] = useState<AdminEmployee[] | null>(null);
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [tab, setTab] = useState<"active" | "former">("active");
@@ -756,6 +756,21 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
       load();
     } catch (err) {
       setNotice(errorMessage(err, "Couldn't update the employee's status."));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // Managers can't edit profiles, but can let their reports clock out from the
+  // app (set_phone_clock_out checks they actually manage this person).
+  async function handlePhoneClockOut(row: AdminEmployee, enabled: boolean) {
+    setBusyId(row.id);
+    try {
+      await savePhoneClockOut(row.id, enabled);
+      setNotice(enabled ? `${row.fullName} can now clock out from their phone.` : `${row.fullName} must clock out at the kiosk again.`);
+      load();
+    } catch (err) {
+      setNotice(errorMessage(err, "Couldn't change phone clock-out."));
     } finally {
       setBusyId(null);
     }
@@ -873,6 +888,20 @@ function Employees({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean 
               <span className="capitalize">{row.role.replace("_", " ")}</span>
               <span className="team-cell">{teamLabel(row)}</span>
               <span className="row-actions">
+                {isManager && row.id !== currentUserId && row.active && (
+                  <label
+                    className="phone-clock-out-toggle"
+                    title={row.selfServiceAttendance ? "Already uses the app for all attendance (set by HR)" : "Let them clock out from their phone when the kiosk isn't reachable"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={row.phoneClockOut || row.selfServiceAttendance}
+                      disabled={busyId === row.id || row.selfServiceAttendance}
+                      onChange={(e) => handlePhoneClockOut(row, e.target.checked)}
+                    />
+                    Phone clock-out
+                  </label>
+                )}
                 <button
                   className="icon-action"
                   disabled={busyId === row.id || !row.active}

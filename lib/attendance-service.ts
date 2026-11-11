@@ -38,3 +38,25 @@ export async function recordAttendance(input: AttendanceEventInput): Promise<Att
     lunchEndedAt: row.lunch_ended_at ?? undefined,
   };
 }
+
+// HR or a manager (for their own reports) recording an event at a chosen date
+// and time, e.g. a missed clock-in or a forgotten clock-out. The server checks
+// the caller's authority, the state machine, and that times stay in order.
+export async function recordAttendanceAt(input: {
+  employeeId: string;
+  eventType: AttendanceEventInput["eventType"];
+  workDate: string;
+  occurredAt: string;
+  idempotencyKey: string;
+}): Promise<void> {
+  const supabase = createSupabaseBrowserClient();
+  if (!supabase) throw new Error("Supabase is not configured. Add the public project URL and anon key first.");
+  const { error } = await supabase.rpc("record_attendance_event_at", {
+    p_employee_id: input.employeeId,
+    p_event_type: input.eventType,
+    p_work_date: input.workDate,
+    p_occurred_at: input.occurredAt,
+    p_idempotency_key: input.idempotencyKey,
+  });
+  if (error) throw error;
+}

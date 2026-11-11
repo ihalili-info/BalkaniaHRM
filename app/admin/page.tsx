@@ -53,7 +53,7 @@ import { getLeaveBalances, getLeaveRequests, getMyProfile, submitLeaveRequest } 
 import type { LeaveBalance, LeaveRequestInput, LeaveRequestRecord } from "../../lib/domain";
 import { errorMessage } from "../../lib/errors";
 import { splitFullName } from "../../lib/names";
-import { recordAttendance } from "../../lib/attendance-service";
+import { recordAttendanceAt } from "../../lib/attendance-service";
 import { downloadCsv } from "../../lib/csv";
 import {
   CANDIDATE_STAGE_LABELS,
@@ -516,7 +516,9 @@ function AdminShell({ profile }: { profile: Profile }) {
         {module === "recruitment" && (
           <Recruitment setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} currentUserId={profile.id} />
         )}
-        {module === "attendance" && <Attendance setNotice={setNotice} isHrAdmin={profile.role === "hr_admin"} />}
+        {module === "attendance" && (
+          <Attendance setNotice={setNotice} canRecord={profile.role === "hr_admin" || profile.role === "manager"} currentUserId={profile.id} />
+        )}
         {module === "timesheets" && <Timesheets setNotice={setNotice} />}
         {module === "leaves" && (
           <Leaves
@@ -1899,7 +1901,10 @@ function attendanceRangePresets(today: string): Array<[string, string, string]> 
   ];
 }
 
-function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+// HR and managers can record attendance on someone's behalf (managers only for
+// their own reports -- enforced by record_attendance_event_at). Team leads see
+// the report but don't get the form.
+function Attendance({ setNotice, canRecord, currentUserId }: NoticeProps & { canRecord: boolean; currentUserId: string }) {
   const today = toIsoDate(new Date());
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
@@ -2001,9 +2006,9 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
   return (
     <>
       <Toolbar
-        action={isHrAdmin ? "Record attendance" : "Review exceptions"}
+        action={canRecord ? "Record attendance" : "Review exceptions"}
         onAction={() =>
-          isHrAdmin
+          canRecord
             ? setShowRecordModal(true)
             : setNotice("Attendance exceptions are drawn from attendance_sessions and attendance_events.")
         }
@@ -2015,11 +2020,19 @@ function Attendance({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean
       />
       {showRecordModal && (
         <RecordAttendanceModal
+          currentUserId={currentUserId}
+          defaultDate={singleDay ? fromDate : today}
           onClose={() => setShowRecordModal(false)}
-          onRecorded={(employeeName) => {
+          onRecorded={(employeeName, workDate) => {
             setShowRecordModal(false);
-            setNotice(`Attendance recorded for ${employeeName}.`);
-            load();
+            setNotice(`Attendance recorded for ${employeeName}${workDate === today ? "" : ` on ${formatDate(workDate)}`}.`);
+            // Jump to the day that was recorded so the change is visible.
+            if (workDate < fromDate || workDate > toDate) {
+              setFromDate(workDate);
+              setToDate(workDate);
+            } else {
+              load();
+            }
           }}
         />
       )}
@@ -2142,18 +2155,38 @@ const attendanceEventOptions: Array<[AttendanceEventType, string]> = [
   ["lunch_end", "▶️ Lunch end"],
 ];
 
-function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; onRecorded: (employeeName: string) => void }) {
+function currentTimeHHMM(): string {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+
+function RecordAttendanceModal({
+  currentUserId,
+  defaultDate,
+  onClose,
+  onRecorded,
+}: {
+  currentUserId: string;
+  defaultDate: string;
+  onClose: () => void;
+  onRecorded: (employeeName: string, workDate: string) => void;
+}) {
+  const today = toIsoDate(new Date());
   const [employees, setEmployees] = useState<AdminEmployee[]>([]);
   const [employeeId, setEmployeeId] = useState("");
   const [eventType, setEventType] = useState<AttendanceEventType>("clock_in");
+  const [workDate, setWorkDate] = useState(defaultDate > today ? today : defaultDate);
+  const [time, setTime] = useState(currentTimeHHMM);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    // RLS already limits a manager's list to the people they supervise; drop
+    // their own row, since nobody records attendance for themselves here.
     listEmployees()
-      .then((data) => setEmployees(data.filter((e) => e.active)))
+      .then((data) => setEmployees(data.filter((e) => e.active && e.id !== currentUserId)))
       .catch(() => setEmployees([]));
-  }, []);
+  }, [currentUserId]);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -2161,12 +2194,32 @@ function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; o
       setError("Choose an employee.");
       return;
     }
+    if (!workDate || !time) {
+      setError("Choose a date and time.");
+      return;
+    }
+    // Local date + time as picked, sent as an absolute instant.
+    const occurredAt = new Date(`${workDate}T${time}`);
+    if (Number.isNaN(occurredAt.getTime())) {
+      setError("Enter a valid date and time.");
+      return;
+    }
+    if (occurredAt.getTime() > Date.now() + 60_000) {
+      setError("You can't record attendance in the future.");
+      return;
+    }
     setError(null);
     setSaving(true);
     try {
-      await recordAttendance({ eventType, idempotencyKey: crypto.randomUUID(), source: "admin", employeeId });
+      await recordAttendanceAt({
+        employeeId,
+        eventType,
+        workDate,
+        occurredAt: occurredAt.toISOString(),
+        idempotencyKey: crypto.randomUUID(),
+      });
       const employee = employees.find((e) => e.id === employeeId);
-      onRecorded(employee?.fullName ?? "employee");
+      onRecorded(employee?.fullName ?? "employee", workDate);
     } catch (err) {
       setError(errorMessage(err, "Couldn't record attendance."));
     } finally {
@@ -2181,7 +2234,7 @@ function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; o
           <h2>Record attendance</h2>
           <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
         </div>
-        <p className="muted small">Records the event for today, exactly as if the employee had done it themselves.</p>
+        <p className="muted small">Records the event at the date and time you choose — use it for a missed clock-in or a forgotten clock-out. Events for a day must be entered in order.</p>
         <form className="admin-login-form" onSubmit={handleSubmit}>
           <label>
             Employee
@@ -2199,6 +2252,14 @@ function RecordAttendanceModal({ onClose, onRecorded }: { onClose: () => void; o
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
+          </label>
+          <label>
+            Date
+            <DateInput required value={workDate} max={today} onChange={setWorkDate} disabled={saving} />
+          </label>
+          <label>
+            Time
+            <input type="time" required value={time} onChange={(e) => setTime(e.target.value)} disabled={saving} />
           </label>
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">

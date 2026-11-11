@@ -55,6 +55,7 @@ import { errorMessage } from "../../lib/errors";
 import { splitFullName } from "../../lib/names";
 import { recordAttendanceAt } from "../../lib/attendance-service";
 import { downloadCsv } from "../../lib/csv";
+import { APP_LOCALE, formatCsvDate } from "../../lib/locale";
 import {
   CANDIDATE_STAGE_LABELS,
   CANDIDATE_STAGES,
@@ -559,7 +560,7 @@ const ATTENDANCE_GROUPS: Array<{ key: string; label: string; states: string[]; t
 ];
 
 function TodayAttendance({ stats }: { stats: DashboardStats }) {
-  const timeOf = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
+  const timeOf = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" }) : "—");
   const grouped = ATTENDANCE_GROUPS.map((g) => ({ ...g, rows: stats.sessions.filter((s) => g.states.includes(s.state)) }));
   const rosterByEmployee = new Map(stats.rosterToday.map((r) => [r.shift.employeeId, r]));
   const late = stats.rosterToday.filter((r) => r.status === "late");
@@ -1979,7 +1980,7 @@ function Attendance({ setNotice, canRecord, currentUserId }: NoticeProps & { can
           const breakMinutes = Math.round(spanHours(row.firstBreakStartedAt, row.firstBreakEndedAt) * 60);
           const lunchMinutes = Math.round(spanHours(row.lunchStartedAt, row.lunchEndedAt) * 60);
           return [
-            row.workDate,
+            formatCsvDate(row.workDate),
             ...nameOf(row.employeeId, row.employeeName),
             row.employeeCode,
             teamOf(row) ?? "",
@@ -2551,7 +2552,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         ].sort((a, b) => a.date.localeCompare(b.date));
         for (const entry of entries) {
           if ("shift" in entry) {
-            csvRows.push([...person, entry.date, formatShiftTime(entry.shift), "", "", "", "", 0, "", "", 0, 0, 0, 0, "", "No-show"]);
+            csvRows.push([...person, formatCsvDate(entry.date), formatShiftTime(entry.shift), "", "", "", "", 0, "", "", 0, 0, 0, 0, "", "No-show"]);
             continue;
           }
           const row = entry.row;
@@ -2559,7 +2560,7 @@ function Timesheets({ setNotice }: NoticeProps) {
           const match = rosterMatches.find((m) => m.shift.employeeId === row.employeeId && m.clockedInAt && row.clockedInAt && new Date(m.clockedInAt).getTime() === new Date(row.clockedInAt).getTime());
           csvRows.push([
             ...person,
-            row.workDate,
+            formatCsvDate(row.workDate),
             match ? formatShiftTime(match.shift) : "",
             row.clockedInAt ? formatTime(row.clockedInAt) : "",
             row.clockedOutAt ? formatTime(row.clockedOutAt) : "",
@@ -2891,7 +2892,7 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
       ["Name", "Surname", "From", "To", "Days", "Status", "Medical certificate"],
       [...rows]
         .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.startsOn.localeCompare(b.startsOn))
-        .map((r) => [...nameOf(r.employeeId, r.employeeName), r.startsOn, r.endsOn, leaveDays(r), r.status, r.medicalCertificatePath ? "Yes" : "No"]),
+        .map((r) => [...nameOf(r.employeeId, r.employeeName), formatCsvDate(r.startsOn), formatCsvDate(r.endsOn), leaveDays(r), r.status, r.medicalCertificatePath ? "Yes" : "No"]),
     );
   }
 
@@ -4686,7 +4687,7 @@ function RosterView({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePr
   function handleExport() {
     downloadCsv(
       `roster-${week}.csv`,
-      ["Name", "Surname", "Team", ...days.map((d, i) => `${weekdayOptions[i][1]} ${d}${holidayOn.has(d) ? ` (${holidayOn.get(d)})` : ""}`), "Paid hours"],
+      ["Name", "Surname", "Team", ...days.map((d, i) => `${weekdayOptions[i][1]} ${formatCsvDate(d)}${holidayOn.has(d) ? ` (${holidayOn.get(d)})` : ""}`), "Paid hours"],
       visible.map((e) => {
         let total = 0;
         const cells = days.map((d) => {
@@ -4985,7 +4986,7 @@ function RosterDayModal({
           <div>
             <h2>Plan the day</h2>
             <p className="muted small">
-              {employee.fullName} · {new Date(`${date}T00:00:00`).toLocaleDateString([], { weekday: "long", day: "numeric", month: "short" })}
+              {employee.fullName} · {new Date(`${date}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "long", day: "numeric", month: "short" })}
               {shift && ` · ${shift.status === "draft" ? "Draft" : "Published"} shift`}
             </p>
           </div>
@@ -5546,7 +5547,7 @@ function RotationsCalendar() {
 // -- Swap requests (approval) --
 
 function swapShiftText(s: { shiftDate: string; startsAt: string; endsAt: string } | null) {
-  return s ? `${new Date(`${s.shiftDate}T00:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${s.startsAt.slice(0, 5)}–${s.endsAt.slice(0, 5)}` : "—";
+  return s ? `${new Date(`${s.shiftDate}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "short", day: "numeric", month: "short" })} ${s.startsAt.slice(0, 5)}–${s.endsAt.slice(0, 5)}` : "—";
 }
 
 function SwapRequestsAdmin({ setNotice, onChanged }: NoticeProps & { onChanged: (pendingApproval: number) => void }) {
@@ -6974,7 +6975,7 @@ function Devices({ setNotice }: NoticeProps) {
                 <b>{device.label}</b>
                 <p className="muted">
                   {device.active ? "Active" : "Inactive"} · Restricted kiosk account
-                  {device.lastSeenAt && <> · Last active {new Date(device.lastSeenAt).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</>}
+                  {device.lastSeenAt && <> · Last active {new Date(device.lastSeenAt).toLocaleString(APP_LOCALE, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</>}
                 </p>
               </div>
               <span className={`pill ${device.paired ? "success" : ""}`}>{device.paired ? "Paired" : "Not paired"}</span>
@@ -7101,7 +7102,7 @@ function fromLocalDateTimeInput(value: string): string | null {
 }
 
 function formatDateTime(iso: string) {
-  return new Date(iso).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleString(APP_LOCALE, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
 function Recruitment({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { isHrAdmin: boolean; currentUserId: string }) {
@@ -7147,7 +7148,7 @@ function Recruitment({ setNotice, isHrAdmin, currentUserId }: NoticeProps & { is
         JOB_STATUS_LABELS[job.status],
         job.applicationCount,
         job.hiringTeam.map((m) => m.name).join("; "),
-        job.createdAt.slice(0, 10),
+        formatCsvDate(job.createdAt),
       ]),
     );
   }
@@ -7457,7 +7458,7 @@ function JobPipeline({
         c.source ?? "",
         CANDIDATE_STAGE_LABELS[c.stage],
         c.interviewAt ? formatDateTime(c.interviewAt) : "",
-        c.createdAt.slice(0, 10),
+        formatCsvDate(c.createdAt),
       ]),
     );
   }
@@ -8071,11 +8072,11 @@ function stateLabel(state: string) {
 }
 
 function formatTime(value: string) {
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(value).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDate(value: string) {
-  return new Date(`${value}T00:00:00`).toLocaleDateString([], { day: "2-digit", month: "short" });
+  return new Date(`${value}T00:00:00`).toLocaleDateString(APP_LOCALE, { day: "2-digit", month: "short" });
 }
 
 function formatDaysValue(value: number) {

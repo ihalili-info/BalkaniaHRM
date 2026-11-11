@@ -24,6 +24,7 @@ import {
 import { changePassword, getCurrentSession, onAuthStateChange, signInWithPassword, signOut, supabaseConfigured } from "../lib/auth-service";
 import { errorMessage } from "../lib/errors";
 import { recordAttendance } from "../lib/attendance-service";
+import { APP_LOCALE } from "../lib/locale";
 import {
   getLeaveBalances,
   getLeaveRequests,
@@ -1226,7 +1227,7 @@ function TrackingScreen({
 
 function MonthTab({ sessions }: { sessions: MonthSessionSummary[] }) {
   const summary = useMemo(() => monthSummary(sessions), [sessions]);
-  const monthLabel = new Date().toLocaleDateString([], { month: "long", year: "numeric" });
+  const monthLabel = new Date().toLocaleDateString(APP_LOCALE, { month: "long", year: "numeric" });
 
   return (
     <>
@@ -1470,7 +1471,7 @@ function shiftDayLabel(date: string) {
   const tomorrow = addDays(today, 1);
   if (date === today) return "Today";
   if (date === tomorrow) return "Tomorrow";
-  return new Date(`${date}T00:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  return new Date(`${date}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "short", day: "numeric", month: "short" });
 }
 
 function NextShiftCard({ profile, onOpen }: { profile: Profile; onOpen: () => void }) {
@@ -1931,11 +1932,11 @@ function formatDays(value: number) {
 }
 
 function formatDate(value: string) {
-  return new Date(`${value}T00:00:00`).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" });
+  return new Date(`${value}T00:00:00`).toLocaleDateString(APP_LOCALE, { day: "2-digit", month: "short", year: "numeric" });
 }
 
 function formatTime(value: string) {
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(value).toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" });
 }
 
 function eventLabel(type: AttendanceEventType) {

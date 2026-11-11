@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
+import { APP_LOCALE } from "../lib/locale";
 
 // A date field that accepts pasted or typed dates in any common format
 // ("2023-08-30", "30/08/2023", "30.08.23", "30 Aug 2023", "August 30, 2023",
@@ -29,12 +30,12 @@ function fullYear(y: number, digits: number): number {
   return y < 50 ? 2000 + y : 1900 + y;
 }
 
-// Day/month order of the browser's locale, used only when a numeric date is
+// Day/month order of the field's locale, used only when a numeric date is
 // ambiguous (e.g. 05/06/2024). Matches what the field displays, so what you see
 // is how it's read.
-function localeOrder(): "dmy" | "mdy" | "ymd" {
+function localeOrder(locale?: string): "dmy" | "mdy" | "ymd" {
   try {
-    const parts = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" })
+    const parts = new Intl.DateTimeFormat(locale, { year: "numeric", month: "2-digit", day: "2-digit" })
       .formatToParts(new Date(2000, 10, 22))
       .filter((p) => p.type === "day" || p.type === "month" || p.type === "year")
       .map((p) => p.type[0])
@@ -46,7 +47,7 @@ function localeOrder(): "dmy" | "mdy" | "ymd" {
   return "dmy";
 }
 
-export function parseDateInput(raw: string): string | null {
+export function parseDateInput(raw: string, locale?: string): string | null {
   const text = raw.trim().toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, "$1").replace(/,/g, " ").replace(/\s+/g, " ");
   if (!text) return null;
 
@@ -69,7 +70,7 @@ export function parseDateInput(raw: string): string | null {
     const year = fullYear(+m[3], m[3].length);
     if (a > 12) return isoFrom(year, b, a);
     if (b > 12) return isoFrom(year, a, b);
-    return localeOrder() === "mdy" ? isoFrom(year, a, b) : isoFrom(year, b, a);
+    return localeOrder(locale) === "mdy" ? isoFrom(year, a, b) : isoFrom(year, b, a);
   }
 
   // Month names, optional weekday: "30 aug 2023", "wed 30 august 2023", "aug 30 2023", "august 30, 2023"
@@ -89,11 +90,11 @@ export function parseDateInput(raw: string): string | null {
   return null;
 }
 
-function formatForDisplay(iso: string): string {
+function formatForDisplay(iso: string, locale?: string): string {
   const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return iso;
   try {
-    return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(+m[1], +m[2] - 1, +m[3]));
+    return new Intl.DateTimeFormat(locale, { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(+m[1], +m[2] - 1, +m[3]));
   } catch {
     return iso;
   }
@@ -108,6 +109,7 @@ export function DateInput({
   max,
   id,
   "aria-label": ariaLabel,
+  locale = APP_LOCALE,
 }: {
   value: string;
   onChange: (iso: string) => void;
@@ -117,8 +119,11 @@ export function DateInput({
   max?: string;
   id?: string;
   "aria-label"?: string;
+  // BCP 47 tag for how the date is shown and how ambiguous typed dates are
+  // read. Defaults to APP_LOCALE (Irish, DD/MM/YYYY).
+  locale?: string;
 }) {
-  const [text, setText] = useState(() => (value ? formatForDisplay(value) : ""));
+  const [text, setText] = useState(() => (value ? formatForDisplay(value, locale) : ""));
   const [invalid, setInvalid] = useState(false);
   const focused = useRef(false);
   const textRef = useRef<HTMLInputElement>(null);
@@ -127,10 +132,10 @@ export function DateInput({
   // Follow outside changes (picker, form reset, data loading) unless the user is mid-edit.
   useEffect(() => {
     if (!focused.current) {
-      setText(value ? formatForDisplay(value) : "");
+      setText(value ? formatForDisplay(value, locale) : "");
       setInvalid(false);
     }
-  }, [value]);
+  }, [value, locale]);
 
   // Feed the browser's own form validation so an unreadable or out-of-range
   // date blocks submit with a message, like a native date input would.
@@ -139,10 +144,10 @@ export function DateInput({
     if (!el) return;
     let message = "";
     if (invalid) message = "Enter a valid date, e.g. 30/08/2023 or 30 Aug 2023.";
-    else if (value && min && value < min) message = `Date must be on or after ${formatForDisplay(min)}.`;
-    else if (value && max && value > max) message = `Date must be on or before ${formatForDisplay(max)}.`;
+    else if (value && min && value < min) message = `Date must be on or after ${formatForDisplay(min, locale)}.`;
+    else if (value && max && value > max) message = `Date must be on or before ${formatForDisplay(max, locale)}.`;
     el.setCustomValidity(message);
-  }, [invalid, value, min, max]);
+  }, [invalid, value, min, max, locale]);
 
   function commit(raw: string) {
     if (!raw.trim()) {
@@ -151,13 +156,13 @@ export function DateInput({
       if (value !== "") onChange("");
       return;
     }
-    const iso = parseDateInput(raw);
+    const iso = parseDateInput(raw, locale);
     if (!iso) {
       setInvalid(true);
       return;
     }
     setInvalid(false);
-    setText(formatForDisplay(iso));
+    setText(formatForDisplay(iso, locale));
     if (iso !== value) onChange(iso);
   }
 
@@ -181,7 +186,7 @@ export function DateInput({
         type="text"
         inputMode="numeric"
         autoComplete="off"
-        placeholder={formatForDisplay("2026-12-31").replace("31", "DD").replace("12", "MM").replace("2026", "YYYY")}
+        placeholder={formatForDisplay("2026-12-31", locale).replace("31", "DD").replace("12", "MM").replace("2026", "YYYY")}
         aria-label={ariaLabel}
         aria-invalid={invalid || undefined}
         required={required}
@@ -201,7 +206,7 @@ export function DateInput({
         onPaste={(e) => {
           // Normalise straight away rather than waiting for blur.
           const pasted = e.clipboardData.getData("text");
-          if (parseDateInput(pasted)) {
+          if (parseDateInput(pasted, locale)) {
             e.preventDefault();
             commit(pasted);
           }
@@ -225,7 +230,7 @@ export function DateInput({
         disabled={disabled}
         onChange={(e) => {
           setInvalid(false);
-          setText(e.target.value ? formatForDisplay(e.target.value) : "");
+          setText(e.target.value ? formatForDisplay(e.target.value, locale) : "");
           onChange(e.target.value);
         }}
       />

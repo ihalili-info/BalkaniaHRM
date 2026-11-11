@@ -17,6 +17,7 @@ import {
 } from "../../lib/kiosk-service";
 import type { AttendanceEventType, AttendanceState } from "../../lib/domain";
 import { playKioskError, playKioskSuccess, unlockKioskSound } from "../../lib/kiosk-sound";
+import { APP_LOCALE } from "../../lib/locale";
 
 const eventLabels: Record<AttendanceEventType, string> = {
   clock_in: "Clock in",
@@ -379,7 +380,7 @@ export default function KioskPage() {
               <span className="kiosk-result-icon"><Icon name="check" size={56} strokeWidth={2.6} /></span>
               <p className="kiosk-result-name">{success.name}</p>
               <p className="kiosk-result-detail">
-                {eventLabels[success.action]} · {success.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                {eventLabels[success.action]} · {success.at.toLocaleTimeString(APP_LOCALE, { hour: "2-digit", minute: "2-digit" })}
               </p>
             </div>
           )}

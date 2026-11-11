@@ -16,5 +16,5 @@ export const metadata: Metadata = {
 export const viewport: Viewport = { themeColor: "#1c2260" };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" className={inter.variable}><body><ServiceWorker />{children}</body></html>;
+  return <html lang="en-IE" className={inter.variable}><body><ServiceWorker />{children}</body></html>;
 }

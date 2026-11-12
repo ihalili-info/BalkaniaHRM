@@ -166,14 +166,16 @@ export function DateInput({
     if (iso !== value) onChange(iso);
   }
 
-  function openPicker() {
-    const native = nativeRef.current;
-    if (!native) return;
+  // The invisible native date input sits right over the calendar icon, so a
+  // tap lands on it directly: phones (iOS Safari especially) only open their
+  // date picker for a real tap on a date input, not for showPicker()/click()
+  // on a hidden one. Desktop browsers don't open the popup when the field's
+  // body is clicked, so ask for it explicitly there too.
+  function openPicker(e: React.MouseEvent<HTMLInputElement>) {
     try {
-      native.showPicker();
+      e.currentTarget.showPicker();
     } catch {
-      native.focus();
-      native.click();
+      // Already open, or not supported -- the tap itself opens it on phones.
     }
   }
 
@@ -215,15 +217,17 @@ export function DateInput({
           if (e.key === "Enter") commit(e.currentTarget.value);
         }}
       />
-      <button type="button" className="date-input-button" onClick={openPicker} disabled={disabled} aria-label="Open calendar" tabIndex={-1}>
+      <span className="date-input-button" aria-hidden="true">
         <Icon name="calendar" size={16} />
-      </button>
+      </span>
       <input
         ref={nativeRef}
         className="date-input-native"
         type="date"
         tabIndex={-1}
-        aria-hidden="true"
+        aria-label="Open calendar"
+        title="Open calendar"
+        onClick={openPicker}
         value={value}
         min={min}
         max={max}

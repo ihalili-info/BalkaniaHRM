@@ -363,7 +363,7 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
 .card label.certificate-upload { display: inline-flex; margin: 4px 0 0; font-size: 13px; cursor: pointer; }
 
 /* DateInput (components/date-input.tsx): a text field that accepts pasted dates
-   in any format, with a calendar button that opens the native picker. The
+   in any format, with a calendar icon that opens the native picker. The
    two-class selectors outrank the forms' generic "input { display:block ... }". */
 .date-input { position: relative; display: block; margin-top: 6px; }
 .timesheet-range .date-input { margin-top: 0; }
@@ -383,23 +383,36 @@ h2 { font-size: 16px; margin: 0; font-weight: 600; }
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  cursor: pointer;
+  pointer-events: none;
 }
-.date-input .date-input-button:hover:not(:disabled) { background: var(--surface-subtle); color: var(--ink); }
-/* Kept in the DOM (showPicker needs a rendered input) but invisible, anchored
-   under the button so the native popup opens next to the field. */
+.date-input .date-input-button:has(+ .date-input-native:hover:not(:disabled)) { background: var(--surface-subtle); color: var(--ink); }
+/* The real (invisible) date input, laid exactly over the calendar icon so a
+   tap opens the browser's own picker -- phones only do that for a direct tap.
+   Two-class selector so it beats ".modal input, .card input". */
 .date-input .date-input-native {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 1px;
-  height: 1px;
+  top: 50%;
+  right: 6px;
+  z-index: 1;
+  transform: translateY(-50%);
+  display: block;
+  width: 32px;
+  min-width: 0;
+  max-width: 32px;
+  height: 32px;
+  min-height: 0;
   margin: 0;
   padding: 0;
   border: 0;
+  font-size: 16px; /* stops iOS zooming in on tap */
   opacity: 0;
-  pointer-events: none;
+  overflow: hidden;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
 }
+.date-input .date-input-native::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; cursor: pointer; }
+.date-input .date-input-native:disabled { cursor: default; }
 
 /* Employee app: next shift card + swaps */
 .card.next-shift { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; font: inherit; color: var(--ink); cursor: pointer; border-left: 4px solid var(--brand); }

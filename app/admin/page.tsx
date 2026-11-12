@@ -4334,7 +4334,7 @@ function ShiftTemplates({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boo
               </div>
               <div className="template-chips">
                 <span className="pill"><Icon name="calendar" size={12} /> {t.workingDays.length} working days</span>
-                <span className="pill"><Icon name="clock" size={12} /> {t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)} · {formatHours(templateHours(t))} paid</span>
+                <span className="pill"><Icon name="clock" size={12} /> {formatShiftTime(t)} · {t.endsAt ? `${formatHours(templateHours(t))} paid` : "open-ended"}</span>
                 {t.unpaidBreakMinutes > 0 && <span className="pill pending"><Icon name="utensils" size={12} /> {t.unpaidBreakMinutes} min break · unpaid</span>}
               </div>
               <div className="weekday-pills">
@@ -4365,7 +4365,9 @@ function ShiftTemplateModal({
   const [name, setName] = useState(template?.name ?? "");
   const [branchName, setBranchName] = useState(template?.branchName ?? "");
   const [startsAt, setStartsAt] = useState(template?.startsAt.slice(0, 5) ?? "09:00");
-  const [endsAt, setEndsAt] = useState(template?.endsAt.slice(0, 5) ?? "17:00");
+  const [endsAt, setEndsAt] = useState(template?.endsAt?.slice(0, 5) ?? "17:00");
+  // Open-ended: start time only, finish whenever the work is done (drivers).
+  const [openEnded, setOpenEnded] = useState(template ? template.endsAt === null : false);
   const [unpaidBreak, setUnpaidBreak] = useState(String(template?.unpaidBreakMinutes ?? 30));
   const [workingDays, setWorkingDays] = useState<number[]>(template?.workingDays ?? [1, 2, 3, 4, 5]);
   const [color, setColor] = useState(template?.color ?? SHIFT_COLORS[0]);
@@ -4379,17 +4381,17 @@ function ShiftTemplateModal({
 
   const breakMinutes = Number(unpaidBreak);
   const overnight = endsAt <= startsAt;
-  const paid = shiftHours({ shiftDate: "2026-01-05", startsAt, endsAt, unpaidBreakMinutes: Number.isFinite(breakMinutes) ? breakMinutes : 0 });
+  const paid = shiftHours({ shiftDate: "2026-01-05", startsAt, endsAt: openEnded ? null : endsAt, unpaidBreakMinutes: Number.isFinite(breakMinutes) ? breakMinutes : 0 });
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!workingDays.length) return setError("Pick at least one working day.");
-    if (startsAt === endsAt) return setError("Start and end can't be the same time.");
+    if (!openEnded && startsAt === endsAt) return setError("Start and end can't be the same time.");
     if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
     setError(null);
     setSaving(true);
     try {
-      const input = { name, branchName: branchName || null, startsAt, endsAt, workingDays, isDefault, color, unpaidBreakMinutes: breakMinutes };
+      const input = { name, branchName: branchName || null, startsAt, endsAt: openEnded ? null : endsAt, workingDays, isDefault, color, unpaidBreakMinutes: breakMinutes };
       const saved = template ? await updateWorkSchedule(template.id, input) : await createWorkSchedule(input);
       onSaved(saved);
     } catch (err) {
@@ -4419,15 +4421,24 @@ function ShiftTemplateModal({
             Starts at
             <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
           </label>
-          <label>
-            Ends at
-            <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
-            {overnight && startsAt !== endsAt && <small className="field-hint">Night shift — ends the next day.</small>}
+          {!openEnded && (
+            <label>
+              Ends at
+              <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
+              {overnight && startsAt !== endsAt && <small className="field-hint">Night shift — ends the next day.</small>}
+            </label>
+          )}
+          <label className="checkbox-row">
+            <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} disabled={saving} />
+            <span>
+              Open-ended — no fixed finish time
+              <small className="field-hint">For drivers and anyone who finishes when the job is done. Shows as &ldquo;From {startsAt}&rdquo;; lateness still counts from the start time, and real hours come from their clock-out.</small>
+            </span>
           </label>
           <label>
             Unpaid break (minutes)
             <input type="number" min={0} max={480} step={5} value={unpaidBreak} onChange={(e) => setUnpaidBreak(e.target.value)} disabled={saving} />
-            <small className="field-hint">{formatHours(paid)} paid per shift.</small>
+            <small className="field-hint">{openEnded ? "No scheduled hours — paid time comes from clock-in/clock-out." : `${formatHours(paid)} paid per shift.`}</small>
           </label>
           <label>
             Colour
@@ -4877,7 +4888,8 @@ function RosterDayModal({
   const [mode, setMode] = useState<RosterDayMode>(dayOff ? "off" : "shift");
   const [scheduleId, setScheduleId] = useState(shift?.scheduleId ?? "");
   const [startsAt, setStartsAt] = useState(shift?.startsAt.slice(0, 5) ?? "09:00");
-  const [endsAt, setEndsAt] = useState(shift?.endsAt.slice(0, 5) ?? "17:00");
+  const [endsAt, setEndsAt] = useState(shift?.endsAt?.slice(0, 5) ?? "17:00");
+  const [openEnded, setOpenEnded] = useState(shift ? shift.endsAt === null : false);
   const [unpaidBreak, setUnpaidBreak] = useState(String(shift?.unpaidBreakMinutes ?? 30));
   const [note, setNote] = useState(shift?.note ?? dayOff?.note ?? "");
   const [leaveType, setLeaveType] = useState("unpaid");
@@ -4891,7 +4903,8 @@ function RosterDayModal({
     const t = templates.find((x) => x.id === id);
     if (t) {
       setStartsAt(t.startsAt.slice(0, 5));
-      setEndsAt(t.endsAt.slice(0, 5));
+      setOpenEnded(t.endsAt === null);
+      if (t.endsAt) setEndsAt(t.endsAt.slice(0, 5));
       setUnpaidBreak(String(t.unpaidBreakMinutes));
     }
   }
@@ -4911,7 +4924,7 @@ function RosterDayModal({
     event.preventDefault();
     if (mode === "shift") {
       const breakMinutes = Number(unpaidBreak);
-      if (startsAt === endsAt) return setError("Start and end can't be the same time.");
+      if (!openEnded && startsAt === endsAt) return setError("Start and end can't be the same time.");
       if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 480) return setError("Unpaid break must be 0–480 minutes.");
       save(async () => {
         if (dayOff) await removeDayOff(dayOff.id);
@@ -4920,7 +4933,7 @@ function RosterDayModal({
           shiftDate: date,
           scheduleId: scheduleId || null,
           startsAt,
-          endsAt,
+          endsAt: openEnded ? null : endsAt,
           unpaidBreakMinutes: breakMinutes,
           note,
         });
@@ -5026,7 +5039,7 @@ function RosterDayModal({
                   <select value={scheduleId} onChange={(e) => pickTemplate(e.target.value)} disabled={saving}>
                     <option value="">Custom times</option>
                     {templates.map((t) => (
-                      <option key={t.id} value={t.id}>{t.name} ({t.startsAt.slice(0, 5)}–{t.endsAt.slice(0, 5)})</option>
+                      <option key={t.id} value={t.id}>{t.name} ({formatShiftTime(t)})</option>
                     ))}
                   </select>
                 </label>
@@ -5034,10 +5047,16 @@ function RosterDayModal({
                   Starts at
                   <input type="time" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} disabled={saving} />
                 </label>
-                <label>
-                  Ends at
-                  <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
-                  {endsAt < startsAt && <small className="field-hint">Ends the next day.</small>}
+                {!openEnded && (
+                  <label>
+                    Ends at
+                    <input type="time" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} disabled={saving} />
+                    {endsAt < startsAt && <small className="field-hint">Ends the next day.</small>}
+                  </label>
+                )}
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} disabled={saving} />
+                  <span>Open-ended — finishes when the work is done</span>
                 </label>
                 <label>
                   Unpaid break (minutes)
@@ -5244,7 +5263,7 @@ function RotationsView({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bool
                 {r.days.map((id, i) => {
                   const t = id ? templateById.get(id) : undefined;
                   return (
-                    <span key={i} className={t ? "on" : "off"} style={t ? ({ "--shift-color": t.color } as React.CSSProperties) : undefined} title={`Day ${i + 1}: ${t ? `${t.name} ${t.startsAt.slice(0, 5)}–${t.endsAt.slice(0, 5)}` : "Off"}`}>
+                    <span key={i} className={t ? "on" : "off"} style={t ? ({ "--shift-color": t.color } as React.CSSProperties) : undefined} title={`Day ${i + 1}: ${t ? `${t.name} ${formatShiftTime(t)}` : "Off"}`}>
                       {i + 1}
                     </span>
                   );
@@ -5529,7 +5548,7 @@ function RotationsCalendar() {
                         key={d}
                         className={`rc-cell${scheduleId === undefined ? " outside" : t ? " on" : " off"}${d === today ? " today" : ""}`}
                         style={t ? ({ "--shift-color": t.color } as React.CSSProperties) : undefined}
-                        title={`${d}: ${scheduleId === undefined ? "Not on rotation" : t ? `${t.name} ${t.startsAt.slice(0, 5)}–${t.endsAt.slice(0, 5)}` : "Day off"}`}
+                        title={`${d}: ${scheduleId === undefined ? "Not on rotation" : t ? `${t.name} ${formatShiftTime(t)}` : "Day off"}`}
                       />
                     );
                   })}
@@ -5546,8 +5565,8 @@ function RotationsCalendar() {
 
 // -- Swap requests (approval) --
 
-function swapShiftText(s: { shiftDate: string; startsAt: string; endsAt: string } | null) {
-  return s ? `${new Date(`${s.shiftDate}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "short", day: "numeric", month: "short" })} ${s.startsAt.slice(0, 5)}–${s.endsAt.slice(0, 5)}` : "—";
+function swapShiftText(s: { shiftDate: string; startsAt: string; endsAt: string | null } | null) {
+  return s ? `${new Date(`${s.shiftDate}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "short", day: "numeric", month: "short" })} ${formatShiftTime(s)}` : "—";
 }
 
 function SwapRequestsAdmin({ setNotice, onChanged }: NoticeProps & { onChanged: (pendingApproval: number) => void }) {

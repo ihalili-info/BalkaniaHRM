@@ -33,23 +33,32 @@ export function weekStart(iso: string): string {
   return addDays(iso, 1 - isoDow);
 }
 
+// An open-ended shift (endsAt null -- e.g. drivers, who finish when the route
+// is done) has a start time only. For anything that needs a window -- matching
+// a clock-in to it, or deciding it's over in "Next shift" -- it's treated as
+// running this long. It never counts as scheduled hours.
+export const OPEN_SHIFT_WINDOW_HOURS = 14;
+
 // Shift times are local wall-clock times; an end at or before the start means
 // the shift finishes the next day.
-export function shiftBounds(shift: { shiftDate: string; startsAt: string; endsAt: string }): { start: Date; end: Date } {
+export function shiftBounds(shift: { shiftDate: string; startsAt: string; endsAt: string | null }): { start: Date; end: Date } {
   const start = new Date(`${shift.shiftDate}T${shift.startsAt.slice(0, 5)}:00`);
+  if (!shift.endsAt) return { start, end: new Date(start.getTime() + OPEN_SHIFT_WINDOW_HOURS * 3600000) };
   const endDate = shift.endsAt.slice(0, 5) <= shift.startsAt.slice(0, 5) ? addDays(shift.shiftDate, 1) : shift.shiftDate;
   const end = new Date(`${endDate}T${shift.endsAt.slice(0, 5)}:00`);
   return { start, end };
 }
 
-// Paid hours: shift length minus the unpaid break.
-export function shiftHours(shift: { shiftDate: string; startsAt: string; endsAt: string; unpaidBreakMinutes: number }): number {
+// Paid hours: shift length minus the unpaid break. Zero for an open-ended
+// shift -- its real hours come from clock-in/clock-out.
+export function shiftHours(shift: { shiftDate: string; startsAt: string; endsAt: string | null; unpaidBreakMinutes: number }): number {
+  if (!shift.endsAt) return 0;
   const { start, end } = shiftBounds(shift);
   return Math.max(0, (end.getTime() - start.getTime()) / 3600000 - shift.unpaidBreakMinutes / 60);
 }
 
-export function formatShiftTime(shift: { startsAt: string; endsAt: string }): string {
-  return `${shift.startsAt.slice(0, 5)}–${shift.endsAt.slice(0, 5)}`;
+export function formatShiftTime(shift: { startsAt: string; endsAt: string | null }): string {
+  return shift.endsAt ? `${shift.startsAt.slice(0, 5)}–${shift.endsAt.slice(0, 5)}` : `From ${shift.startsAt.slice(0, 5)}`;
 }
 
 // ---- roster ----
@@ -63,7 +72,7 @@ export interface RosterShift {
   shiftDate: string;
   scheduleId: string | null;
   startsAt: string;
-  endsAt: string;
+  endsAt: string | null;
   unpaidBreakMinutes: number;
   note: string | null;
   status: ShiftStatus;
@@ -78,7 +87,7 @@ type ShiftRow = {
   shift_date: string;
   schedule_id: string | null;
   starts_at: string;
-  ends_at: string;
+  ends_at: string | null;
   unpaid_break_minutes: number;
   note: string | null;
   status: ShiftStatus;
@@ -116,7 +125,7 @@ export interface ShiftInput {
   shiftDate: string;
   scheduleId: string | null;
   startsAt: string;
-  endsAt: string;
+  endsAt: string | null;
   unpaidBreakMinutes: number;
   note: string;
 }
@@ -373,11 +382,11 @@ export interface ShiftSwap {
   decidedAt: string | null;
   requesterId: string;
   requesterName: string;
-  requesterShift: { shiftDate: string; startsAt: string; endsAt: string } | null;
+  requesterShift: { shiftDate: string; startsAt: string; endsAt: string | null } | null;
   targetEmployeeId: string;
   targetName: string;
   // null = "cover my shift" (nothing given back)
-  targetShift: { shiftDate: string; startsAt: string; endsAt: string } | null;
+  targetShift: { shiftDate: string; startsAt: string; endsAt: string | null } | null;
   decidedByName: string | null;
 }
 
@@ -394,11 +403,11 @@ export async function listShiftSwaps(): Promise<ShiftSwap[]> {
     requesterId: r.requester_id as string,
     requesterName: r.requester_name as string,
     requesterShift: r.requester_shift_date
-      ? { shiftDate: r.requester_shift_date, startsAt: r.requester_starts_at as string, endsAt: r.requester_ends_at as string }
+      ? { shiftDate: r.requester_shift_date, startsAt: r.requester_starts_at as string, endsAt: (r.requester_ends_at as string | null) ?? null }
       : null,
     targetEmployeeId: r.target_employee_id as string,
     targetName: r.target_name as string,
-    targetShift: r.target_shift_date ? { shiftDate: r.target_shift_date, startsAt: r.target_starts_at as string, endsAt: r.target_ends_at as string } : null,
+    targetShift: r.target_shift_date ? { shiftDate: r.target_shift_date, startsAt: r.target_starts_at as string, endsAt: (r.target_ends_at as string | null) ?? null } : null,
     decidedByName: r.decided_by_name,
   }));
 }

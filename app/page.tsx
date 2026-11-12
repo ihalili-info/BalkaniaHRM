@@ -1719,7 +1719,7 @@ function SwapRequestSheet({ shift, onClose, onSent }: { shift: RosterShift; onCl
                 <optgroup label="Trade for one of their shifts">
                   {trades.map((o) => (
                     <option key={keyOf(o)} value={keyOf(o)}>
-                      {o.employeeName} — {shiftDayLabel(o.shiftDate)} {o.startsAt?.slice(0, 5)}–{o.endsAt?.slice(0, 5)}
+                      {o.employeeName} — {shiftDayLabel(o.shiftDate)} {o.startsAt ? formatShiftTime({ startsAt: o.startsAt, endsAt: o.endsAt }) : ""}
                     </option>
                   ))}
                 </optgroup>

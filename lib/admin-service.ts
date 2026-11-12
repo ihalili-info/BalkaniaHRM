@@ -708,7 +708,7 @@ export interface AdminWorkSchedule {
   name: string;
   branchName: string | null;
   startsAt: string;
-  endsAt: string;
+  endsAt: string | null; // null = open-ended (no fixed finish)
   workingDays: number[];
   isDefault: boolean;
   color: string;
@@ -722,7 +722,7 @@ function mapWorkSchedule(row: {
   name: string;
   branch_name: string | null;
   starts_at: string;
-  ends_at: string;
+  ends_at: string | null;
   working_days: number[] | null;
   is_default: boolean;
   color: string | null;
@@ -751,7 +751,7 @@ export interface CreateWorkScheduleInput {
   name: string;
   branchName?: string | null;
   startsAt: string;
-  endsAt: string;
+  endsAt: string | null;
   workingDays: number[];
   isDefault: boolean;
   color?: string;

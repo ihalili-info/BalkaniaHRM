@@ -2811,11 +2811,10 @@ function leaveDays(row: { startsOn: string; endsOn: string; workingDays?: number
 // "Days taken" is the sick balance's "used" when there is one: approvals add to
 // it, and HR can set it directly (e.g. days taken before Balkania HRM), so it
 // can be higher than the requests listed here.
-function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: boolean }) {
+function SickLeaveReport({ setNotice, isHrAdmin, filter }: NoticeProps & { isHrAdmin: boolean; filter: LeaveFilter }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [balances, setBalances] = useState<AdminLeaveBalance[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
   // undefined = closed, null = "Set sick days" for a person picked in the modal.
   const [editing, setEditing] = useState<{ employeeId: string; employeeName: string } | null | undefined>(undefined);
@@ -2876,7 +2875,7 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
       .sort((a, b) => b.daysTaken - a.daysTaken || a.employeeName.localeCompare(b.employeeName));
   }, [rows, sickBalances]);
 
-  const visible = people.filter((p) => matchesSearch(search, p.employeeName));
+  const visible = people.filter((p) => filter.matches(p.employeeId, p.employeeName));
   const totals = {
     days: people.reduce((sum, p) => sum + p.daysTaken, 0),
     people: people.filter((p) => p.daysTaken > 0).length,
@@ -2914,9 +2913,6 @@ function SickLeaveReport({ setNotice, isHrAdmin }: NoticeProps & { isHrAdmin: bo
         action={isHrAdmin ? "Set sick days" : undefined}
         onAction={isHrAdmin ? () => setEditing(null) : undefined}
         onExport={rows && rows.length > 0 ? handleExport : undefined}
-        search={search}
-        onSearch={setSearch}
-        searchPlaceholder="Search employee"
       />
       {editing !== undefined && (
         <SickDaysModal
@@ -3120,6 +3116,21 @@ function SickDaysModal({
   );
 }
 
+// Search + team filter from the Leave management header, applied by each tab.
+type LeaveFilter = {
+  active: boolean;
+  matches: (employeeId: string, name: string, ...extra: Array<string | null | undefined>) => boolean;
+};
+
+// Empty state when rows exist but the type/search/team filters hide them all.
+function LeaveFilteredEmpty({ what, typeFilter, filter }: { what: string; typeFilter: LeaveTypeFilterValue; filter: LeaveFilter }) {
+  return filter.active ? (
+    <EmptyPanel icon="search" title="No one matches these filters" note="Try another name, team or leave type." />
+  ) : (
+    <EmptyPanel icon="calendar" title={`No ${what} ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
+  );
+}
+
 function Leaves({
   setNotice,
   isHrAdmin,
@@ -3127,10 +3138,41 @@ function Leaves({
   isTeamLead,
   currentUserId,
 }: NoticeProps & { isHrAdmin: boolean; isManager: boolean; isTeamLead: boolean; currentUserId: string }) {
-  const [view, setView] = useState<"requests" | "upcoming" | "decided" | "sick" | "entitlements">("requests");
+  const [view, setView] = useState<"requests" | "planner" | "upcoming" | "decided" | "sick" | "entitlements">("requests");
   // Shared by Requests / Upcoming / Decided so it sticks when switching tabs.
   const [typeFilter, setTypeFilter] = useState<LeaveTypeFilterValue>("all");
+  // Search and team filter are shared by every tab too, so you can pick a
+  // team (or type a name) once and flip between Requests, Sick leave, ...
+  const [search, setSearch] = useState("");
+  const [teamFilter, setTeamFilter] = useState("");
+  const [employees, setEmployees] = useState<Map<string, AdminEmployee>>(new Map());
+  const [teams, setTeams] = useState<AdminTeam[]>([]);
+  const [peopleLoaded, setPeopleLoaded] = useState(false);
   const showTabs = isHrAdmin || isManager || isTeamLead;
+
+  useEffect(() => {
+    // RLS limits both lists to what the viewer may see; only used for filtering.
+    Promise.all([listEmployees(), listTeams()])
+      .then(([e, t]) => {
+        setEmployees(new Map(e.map((x) => [x.id, x])));
+        setTeams(t);
+      })
+      .catch(() => undefined)
+      .finally(() => setPeopleLoaded(true));
+  }, []);
+
+  // Name, employee code or team name (typing "Transport" finds that team),
+  // plus any extra text a tab wants searchable, e.g. the leave type.
+  const filter: LeaveFilter = {
+    active: search.trim() !== "" || teamFilter !== "",
+    matches: (employeeId, name, ...extra) => {
+      const employee = employees.get(employeeId);
+      return (
+        matchesTeam(teamFilter, employee?.teamId, teams) &&
+        matchesSearch(search, name, employee?.employeeCode, employee?.teamName, ...extra)
+      );
+    },
+  };
   // Only a manager (or HR) can revisit a decision -- a team lead can't undo
   // their own call, which is what the server enforces too.
   const canOverride = isHrAdmin || isManager;
@@ -3140,6 +3182,7 @@ function Leaves({
       {showTabs && (
         <div className="module-tabs">
           <button className={view === "requests" ? "active" : ""} onClick={() => setView("requests")}>Requests</button>
+          <button className={view === "planner" ? "active" : ""} onClick={() => setView("planner")}>Planner</button>
           <button className={view === "upcoming" ? "active" : ""} onClick={() => setView("upcoming")}>Upcoming leave</button>
           <button className={view === "decided" ? "active" : ""} onClick={() => setView("decided")}>Decided</button>
           <button className={view === "sick" ? "active" : ""} onClick={() => setView("sick")}>Sick leave</button>
@@ -3148,19 +3191,229 @@ function Leaves({
           )}
         </div>
       )}
-      {(!showTabs || view === "requests" || view === "upcoming" || view === "decided") && (
+      <div className="leave-filters">
+        <div className="search-input">
+          <Icon name="search" size={15} />
+          <input
+            type="search"
+            placeholder="Search name, code or team"
+            aria-label="Search name, code or team"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <select className="team-select" value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} aria-label="Filter by team">
+          <option value="">All teams</option>
+          <TeamFilterOptions teams={teams} />
+          <option value="none">{NO_TEAM}</option>
+        </select>
+      </div>
+      {(!showTabs || view === "requests" || view === "planner" || view === "upcoming" || view === "decided") && (
         <LeaveTypeFilter value={typeFilter} onChange={setTypeFilter} />
       )}
-      {showTabs && view === "upcoming" ? (
-        <UpcomingLeave typeFilter={typeFilter} />
+      {showTabs && view === "planner" ? (
+        <LeavePlanner employees={peopleLoaded ? employees : null} typeFilter={typeFilter} filter={filter} />
+      ) : showTabs && view === "upcoming" ? (
+        <UpcomingLeave typeFilter={typeFilter} filter={filter} />
       ) : showTabs && view === "decided" ? (
-        <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} typeFilter={typeFilter} />
+        <DecidedLeave setNotice={setNotice} canOverride={canOverride} isHrAdmin={isHrAdmin} typeFilter={typeFilter} filter={filter} />
       ) : showTabs && view === "sick" ? (
-        <SickLeaveReport setNotice={setNotice} isHrAdmin={isHrAdmin} />
+        <SickLeaveReport setNotice={setNotice} isHrAdmin={isHrAdmin} filter={filter} />
       ) : isHrAdmin && view === "entitlements" ? (
-        <LeaveEntitlements setNotice={setNotice} />
+        <LeaveEntitlements setNotice={setNotice} filter={filter} />
       ) : (
-        <LeaveRequests setNotice={setNotice} isHrAdmin={isHrAdmin} currentUserId={currentUserId} typeFilter={typeFilter} />
+        <LeaveRequests setNotice={setNotice} isHrAdmin={isHrAdmin} currentUserId={currentUserId} typeFilter={typeFilter} filter={filter} />
+      )}
+    </>
+  );
+}
+
+// -- Leave planner: a month calendar, one row per employee --
+
+const PLANNER_TYPE_CLASS: Record<string, string> = { annual: "annual", medical: "medical", unpaid: "unpaid", other: "other" };
+
+function monthStartOf(iso: string) {
+  return `${iso.slice(0, 7)}-01`;
+}
+
+function shiftMonth(monthStart: string, delta: number) {
+  const [y, m] = monthStart.split("-").map(Number);
+  return toIsoDate(new Date(y, m - 1 + delta, 1));
+}
+
+function LeavePlanner({
+  employees,
+  typeFilter,
+  filter,
+}: {
+  // null while the employee list is still loading.
+  employees: Map<string, AdminEmployee> | null;
+  typeFilter: LeaveTypeFilterValue;
+  filter: LeaveFilter;
+}) {
+  const today = toIsoDate(new Date());
+  const [month, setMonth] = useState(monthStartOf(today));
+  const [leave, setLeave] = useState<RosterLeave[] | null>(null);
+  const [holidays, setHolidays] = useState<Map<string, string>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+  const [onlyOnLeave, setOnlyOnLeave] = useState(false);
+
+  const [y, m] = month.split("-").map(Number);
+  const monthEnd = toIsoDate(new Date(y, m, 0));
+  const days: string[] = [];
+  for (let d = month; d <= monthEnd; d = addDays(d, 1)) days.push(d);
+  const monthLabel = new Date(y, m - 1, 1).toLocaleDateString(APP_LOCALE, { month: "long", year: "numeric" });
+
+  useEffect(() => {
+    setLeave(null);
+    setError(null);
+    // RLS scopes leave to the viewer: HR sees everyone, managers and team
+    // leads the people they supervise.
+    Promise.all([listRosterLeave(month, monthEnd), listHolidaysBetween(month, monthEnd).catch(() => [])])
+      .then(([l, h]) => {
+        setLeave(l);
+        setHolidays(new Map(h.map((x) => [x.date, x.name])));
+      })
+      .catch((err) => setError(errorMessage(err, "Couldn't load leave for this month.")));
+  }, [month, monthEnd]);
+
+  // Employee|date -> the leave covering it. Approved wins over pending.
+  const leaveOn = useMemo(() => {
+    const map = new Map<string, RosterLeave>();
+    for (const l of leave ?? []) {
+      if (!matchesLeaveType(l.leaveType, typeFilter)) continue;
+      const from = l.startsOn > month ? l.startsOn : month;
+      const to = l.endsOn < monthEnd ? l.endsOn : monthEnd;
+      for (let d = from; d <= to; d = addDays(d, 1)) {
+        const key = `${l.employeeId}|${d}`;
+        const existing = map.get(key);
+        if (!existing || (existing.status === "pending" && l.status === "approved")) map.set(key, l);
+      }
+    }
+    return map;
+  }, [leave, typeFilter, month, monthEnd]);
+
+  const withLeave = new Set([...leaveOn.keys()].map((k) => k.split("|")[0]));
+  const offToday = new Set(
+    [...leaveOn.entries()].filter(([k, l]) => k.endsWith(`|${today}`) && l.status === "approved").map(([k]) => k.split("|")[0]),
+  );
+
+  const people = [...(employees?.values() ?? [])]
+    .filter((e) => e.active && e.role !== "kiosk")
+    .filter((e) => filter.matches(e.id, e.fullName))
+    .filter((e) => !onlyOnLeave || withLeave.has(e.id))
+    .sort((a, b) => compareTeams(a.teamName, b.teamName) || a.fullName.localeCompare(b.fullName));
+
+  const isWeekend = (d: string) => {
+    const day = new Date(`${d}T00:00:00`).getDay();
+    return day === 0 || day === 6;
+  };
+
+  let previousTeam: string | null | undefined;
+  return (
+    <>
+      <div className="planner-toolbar">
+        <div className="planner-nav">
+          <button className="icon-action" onClick={() => setMonth(shiftMonth(month, -1))} aria-label="Previous month" title="Previous month">
+            <Icon name="chevronLeft" size={16} />
+          </button>
+          <b>{monthLabel}</b>
+          <button className="icon-action" onClick={() => setMonth(shiftMonth(month, 1))} aria-label="Next month" title="Next month">
+            <Icon name="chevronRight" size={16} />
+          </button>
+          {month !== monthStartOf(today) && (
+            <button className="outline-button" onClick={() => setMonth(monthStartOf(today))}>This month</button>
+          )}
+        </div>
+        <label className="planner-only">
+          <input type="checkbox" checked={onlyOnLeave} onChange={(e) => setOnlyOnLeave(e.target.checked)} />
+          Only people with leave this month
+        </label>
+      </div>
+      <div className="admin-stats">
+        <Stat label="Off today" value={month === monthStartOf(today) ? String(offToday.size) : "—"} note="Approved leave today" />
+        <Stat label="With leave this month" value={String(people.filter((p) => withLeave.has(p.id)).length)} note={monthLabel} />
+        <Stat label="Employees shown" value={String(people.length)} note={filter.active ? "Matching your filters" : "Everyone you can see"} />
+      </div>
+      <div className="planner-legend">
+        <span><i className="planner-swatch annual" /> Annual</span>
+        <span><i className="planner-swatch medical" /> Sick</span>
+        <span><i className="planner-swatch unpaid" /> Unpaid</span>
+        <span><i className="planner-swatch other" /> Other</span>
+        <span><i className="planner-swatch pending" /> Pending approval</span>
+        <span><i className="planner-swatch holiday" /> Bank holiday</span>
+      </div>
+      {error ? (
+        <ErrorState message={error} />
+      ) : !leave || !employees ? (
+        <LoadingPanel />
+      ) : people.length === 0 ? (
+        <EmptyPanel
+          icon="calendar"
+          title={onlyOnLeave ? `No one has leave in ${monthLabel}` : "No one matches these filters"}
+          note={onlyOnLeave ? "Untick the box to see everyone, or try another month." : "Try another name or team."}
+        />
+      ) : (
+        <section className="panel planner-panel">
+          <div className="planner-grid" role="grid" aria-label={`Leave planner, ${monthLabel}`} style={{ "--planner-days": days.length } as React.CSSProperties}>
+            <div className="planner-row planner-head" role="row">
+              <span role="columnheader" className="planner-name">Employee</span>
+              {days.map((d) => {
+                const holiday = holidays.get(d);
+                return (
+                  <span
+                    key={d}
+                    role="columnheader"
+                    className={`planner-day${isWeekend(d) ? " weekend" : ""}${holiday ? " holiday" : ""}${d === today ? " today" : ""}`}
+                    title={holiday ? `Bank holiday: ${holiday}` : undefined}
+                  >
+                    {new Date(`${d}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "narrow" })}
+                    <small>{Number(d.slice(8))}</small>
+                  </span>
+                );
+              })}
+            </div>
+            {people.map((person) => {
+              const header =
+                previousTeam === undefined || person.teamName !== previousTeam ? (
+                  <div className="planner-team" role="row">
+                    <b>{person.teamName ?? NO_TEAM}</b>
+                  </div>
+                ) : null;
+              previousTeam = person.teamName;
+              return (
+                <Fragment key={person.id}>
+                  {header}
+                  <div className={`planner-row${offToday.has(person.id) ? " off-today" : ""}`} role="row">
+                    <span role="rowheader" className="planner-name" title={person.fullName}>
+                      {person.fullName}
+                      {offToday.has(person.id) && <em className="pill pending">Off today</em>}
+                    </span>
+                    {days.map((d) => {
+                      const l = leaveOn.get(`${person.id}|${d}`);
+                      const holiday = holidays.get(d);
+                      const classes = [
+                        "planner-cell",
+                        isWeekend(d) ? "weekend" : "",
+                        holiday ? "holiday" : "",
+                        d === today ? "today" : "",
+                        l ? `on-leave ${PLANNER_TYPE_CLASS[l.leaveType] ?? "other"}${l.status === "pending" ? " pending" : ""}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ");
+                      const title = l
+                        ? `${person.fullName}: ${leaveTypeLabel(l.leaveType)} leave${l.status === "pending" ? " (pending approval)" : ""}, ${formatDate(l.startsOn)} – ${formatDate(l.endsOn)}${l.note ? ` · ${l.note}` : ""}`
+                        : holiday
+                          ? `Bank holiday: ${holiday}`
+                          : undefined;
+                      return <span key={d} role="gridcell" className={classes} title={title} />;
+                    })}
+                  </div>
+                </Fragment>
+              );
+            })}
+          </div>
+        </section>
       )}
     </>
   );
@@ -3171,7 +3424,8 @@ function DecidedLeave({
   canOverride,
   isHrAdmin,
   typeFilter,
-}: NoticeProps & { canOverride: boolean; isHrAdmin: boolean; typeFilter: LeaveTypeFilterValue }) {
+  filter,
+}: NoticeProps & { canOverride: boolean; isHrAdmin: boolean; typeFilter: LeaveTypeFilterValue; filter: LeaveFilter }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -3226,14 +3480,16 @@ function DecidedLeave({
     }
   }
 
+  const visible = (rows ?? []).filter((r) => matchesLeaveType(r.leaveType, typeFilter) && filter.matches(r.employeeId, r.employeeName));
+
   return error ? (
     <ErrorState message={error} />
   ) : !rows ? (
     <LoadingPanel />
   ) : rows.length === 0 ? (
     <EmptyPanel icon="calendar" title="Nothing decided yet" note="Approved and rejected requests appear here." />
-  ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
-    <EmptyPanel icon="calendar" title={`No decided ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
+  ) : visible.length === 0 ? (
+    <LeaveFilteredEmpty what="decided" typeFilter={typeFilter} filter={filter} />
   ) : (
     <section className="panel">
       <div className="panel-title">
@@ -3241,7 +3497,7 @@ function DecidedLeave({
         {canOverride && <span className="filter">You can reverse a decision</span>}
       </div>
       <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b>{canOverride ? "Decision" : "Status"}</b></div>
-      {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => (
+      {visible.map((row) => (
         <div className="table-row" key={row.id}>
           <span>{row.employeeName}</span>
           <span>{leaveTypeLabel(row.leaveType)}</span>
@@ -3290,7 +3546,7 @@ function DecidedLeave({
   );
 }
 
-function UpcomingLeave({ typeFilter }: { typeFilter: LeaveTypeFilterValue }) {
+function UpcomingLeave({ typeFilter, filter }: { typeFilter: LeaveTypeFilterValue; filter: LeaveFilter }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -3300,18 +3556,20 @@ function UpcomingLeave({ typeFilter }: { typeFilter: LeaveTypeFilterValue }) {
       .catch((err) => setError(errorMessage(err, "Couldn't load upcoming leave.")));
   }, []);
 
+  const visible = (rows ?? []).filter((r) => matchesLeaveType(r.leaveType, typeFilter) && filter.matches(r.employeeId, r.employeeName));
+
   return error ? (
     <ErrorState message={error} />
   ) : !rows ? (
     <LoadingPanel />
   ) : rows.length === 0 ? (
     <EmptyPanel icon="calendar" title="No upcoming leave" note="Approved and pending leave from today onward will appear here." />
-  ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
-    <EmptyPanel icon="calendar" title={`No upcoming ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
+  ) : visible.length === 0 ? (
+    <LeaveFilteredEmpty what="upcoming" typeFilter={typeFilter} filter={filter} />
   ) : (
     <section className="panel">
       <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b>Status</b></div>
-      {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => (
+      {visible.map((row) => (
         <div className="table-row" key={row.id}>
           <span>{row.employeeName}</span>
           <span>{leaveTypeLabel(row.leaveType)}</span>
@@ -3386,7 +3644,8 @@ function LeaveRequests({
   isHrAdmin,
   currentUserId,
   typeFilter,
-}: NoticeProps & { isHrAdmin: boolean; currentUserId: string; typeFilter: LeaveTypeFilterValue }) {
+  filter,
+}: NoticeProps & { isHrAdmin: boolean; currentUserId: string; typeFilter: LeaveTypeFilterValue; filter: LeaveFilter }) {
   const [rows, setRows] = useState<AdminLeaveRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -3433,6 +3692,8 @@ function LeaveRequests({
     loadMine();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const visiblePending = (rows ?? []).filter((r) => matchesLeaveType(r.leaveType, typeFilter) && filter.matches(r.employeeId, r.employeeName));
 
   async function decide(id: string, status: "approved" | "rejected") {
     setBusyId(id);
@@ -3494,12 +3755,12 @@ function LeaveRequests({
         <LoadingPanel />
       ) : rows.length === 0 ? (
         <EmptyPanel icon="calendar" title="No pending leave requests" note="New requests will appear here for review." />
-      ) : rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).length === 0 ? (
-        <EmptyPanel icon="calendar" title={`No pending ${leaveTypeFilterLabel(typeFilter)}`} note="Try another leave type." />
+      ) : visiblePending.length === 0 ? (
+        <LeaveFilteredEmpty what="pending" typeFilter={typeFilter} filter={filter} />
       ) : (
         <section className="panel">
           <div className="table-head"><b>Employee</b><b>Leave type</b><b>Dates</b><b className="actions-head">Actions</b></div>
-          {rows.filter((r) => matchesLeaveType(r.leaveType, typeFilter)).map((row) => {
+          {visiblePending.map((row) => {
             const isOwnRequest = !isHrAdmin && row.employeeId === currentUserId;
             const after = balanceAfter(row);
             const needsHr = after !== null && !isHrAdmin;
@@ -3650,9 +3911,8 @@ const leaveTypeLabel = (type: string) => leaveTypeOptions.find(([value]) => valu
 // Days to at most 2 decimals, without trailing zeros: 17, 4.3, 11.67.
 const formatLeaveDays = (days: number) => String(Math.round(days * 100) / 100);
 
-function LeaveEntitlements({ setNotice }: NoticeProps) {
+function LeaveEntitlements({ setNotice, filter }: NoticeProps & { filter: LeaveFilter }) {
   const [rows, setRows] = useState<AdminLeaveBalance[] | null>(null);
-  const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<AdminLeaveBalance | null>(null);
@@ -3669,7 +3929,7 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
 
   return (
     <>
-      <Toolbar action="Set entitlement" onAction={() => setShowModal(true)} search={search} onSearch={setSearch} searchPlaceholder="Search employee or leave type" />
+      <Toolbar action="Set entitlement" onAction={() => setShowModal(true)} />
       {(showModal || editing) && (
         <SetEntitlementModal
           existing={editing}
@@ -3700,7 +3960,7 @@ function LeaveEntitlements({ setNotice }: NoticeProps) {
             <b>Employee</b><b>Leave type</b><b>Remaining</b><b>Earned so far</b><b>Used</b><b>Yearly allowance</b><b className="actions-head">Edit</b>
           </div>
           {rows
-            .filter((row) => matchesSearch(search, row.employeeName, leaveTypeLabel(row.leaveType)))
+            .filter((row) => filter.matches(row.employeeId, row.employeeName, leaveTypeLabel(row.leaveType)))
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.leaveType.localeCompare(b.leaveType))
             .map((row) => (
               <div className="table-row cols-7" key={row.id}>

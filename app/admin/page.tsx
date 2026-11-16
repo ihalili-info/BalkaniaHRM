@@ -119,6 +119,7 @@ import {
   listAssets,
   listAttendanceDevices,
   listAttendanceLocations,
+  listAttendanceEntriesByOthers,
   listAttendanceSessions,
   listDisciplinaryActions,
   listEmployees,
@@ -161,6 +162,7 @@ import {
   type AdminAsset,
   type AdminAttendanceLocation,
   type AdminAttendanceSession,
+  type AttendanceEntryByOther,
   type AdminDevice,
   type AssetAssignmentRecord,
   type AssetCategory,
@@ -797,7 +799,7 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
   async function handlePurge(row: AdminEmployee) {
     if (
       !window.confirm(
-        `Permanently purge ${row.fullName}? This deletes their account AND all attendance, leave, and disciplinary records — unlike Delete, this is not blocked by history. This cannot be undone. Only do this for genuine cleanup (e.g. test data), not for normal offboarding — use Deactivate for that.`,
+        `Permanently purge ${row.fullName}? This deletes their account AND all attendance, leave, and disciplinary records. This cannot be undone. It's refused if they have attendance or leave from the last 3 years (4 for sick leave), which Irish law requires you to keep — use Deactivate for former employees.`,
       )
     )
       return;
@@ -2609,6 +2611,94 @@ function Timesheets({ setNotice }: NoticeProps) {
     }
   }
 
+  // Printable report (print it, or "Save as PDF" in the print dialog): per
+  // person, every day's clock-in, breaks, lunch, clock-out and hours, with
+  // their approved leave days in the same timeline.
+  async function handlePrint() {
+    if (!sheetRows) return;
+    // Open the tab synchronously so pop-up blockers allow it, then fill it.
+    const win = window.open("", "_blank");
+    if (!win) {
+      setNotice("Allow pop-ups for this site to print or save the report as PDF.");
+      return;
+    }
+    win.document.write('<p style="font-family: sans-serif; padding: 24px">Preparing report…</p>');
+    setExporting(true);
+    try {
+      const [leave, holidays, byOthers] = await Promise.all([
+        listRosterLeave(startDate, endDate),
+        listHolidaysBetween(startDate, endDate).catch(() => [] as Array<{ date: string; name: string }>),
+        // Audit trail: entries HR / a manager / the system made for someone.
+        listAttendanceEntriesByOthers(startDate, endDate).catch(() => [] as AttendanceEntryByOther[]),
+      ]);
+      const approvedLeave = leave.filter((l) => l.status === "approved" && inTeam(l.employeeId) && names.has(l.employeeId));
+      const people = new Map<string, TimesheetPrintPerson>();
+      const personFor = (employeeId: string, fallbackName: string, fallbackCode: string) => {
+        let person = people.get(employeeId);
+        if (!person) {
+          const who = names.get(employeeId);
+          person = {
+            employeeId,
+            name: who?.name ?? fallbackName,
+            code: who?.code ?? fallbackCode,
+            team: teamOf(employeeId),
+            rows: [],
+            noShows: [],
+            leave: [],
+            enteredByOthers: [],
+            holidayLeft: daysLeft(employeeId, "annual"),
+            sickLeft: daysLeft(employeeId, "medical"),
+          };
+          people.set(employeeId, person);
+        }
+        return person;
+      };
+      for (const s of summaries) {
+        const person = personFor(s.employeeId, s.employeeName, s.employeeCode);
+        person.rows = s.rows;
+        person.noShows = noShowsOf(s.employeeId);
+      }
+      for (const l of approvedLeave) personFor(l.employeeId, "Unknown", "").leave.push(l);
+      // Keep entries inside the period, plus any that belong to a day in it
+      // (e.g. a night shift's clock-out after midnight on the last day).
+      for (const x of byOthers) {
+        const person = people.get(x.employeeId);
+        if (!person) continue;
+        const at = new Date(x.occurredAt).getTime();
+        const local = toIsoDate(new Date(x.occurredAt));
+        const onReportedDay = person.rows.some((r) =>
+          [r.clockedInAt, r.clockedOutAt, r.firstBreakStartedAt, r.firstBreakEndedAt, r.lunchStartedAt, r.lunchEndedAt].some(
+            (iso) => iso && new Date(iso).getTime() === at,
+          ),
+        );
+        if (onReportedDay || (local >= startDate && local <= endDate)) person.enteredByOthers.push(x);
+      }
+      const ordered = [...people.values()].sort(
+        (a, b) => (sort === "team" ? compareTeams(a.team, b.team) : 0) || a.name.localeCompare(b.name),
+      );
+      const teamLabel = !teamFilter ? "All teams" : teamFilter === "none" ? NO_TEAM : teams.find((t) => t.id === teamFilter)?.name ?? "Selected team";
+      win.document.open();
+      win.document.write(
+        timesheetPrintHtml({
+          people: ordered,
+          startDate,
+          endDate,
+          today,
+          teamLabel,
+          holidays: new Map(holidays.map((h) => [h.date, h.name])),
+          // A manager may not be able to see an HR user's profile.
+          recorderName: (id) => (id ? names.get(id)?.name ?? "HR / manager" : "System, or not recorded (before audit tracking)"),
+        }),
+      );
+      win.document.close();
+    } catch (err) {
+      win.close();
+      setNotice(errorMessage(err, "Couldn't prepare the report."));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <>
       <div className="timesheet-range timesheet-controls">
@@ -2625,6 +2715,14 @@ function Timesheets({ setNotice }: NoticeProps) {
         </button>
         <button className="outline-button" onClick={() => handleExport("horizontal")} disabled={exporting} title="One row per employee, with the days across">
           <Icon name="download" size={15} /> Export horizontal
+        </button>
+        <button
+          className="outline-button"
+          onClick={handlePrint}
+          disabled={exporting || !rows}
+          title="Printable report: clock in/out, breaks, lunch, leave and hours per person. Use “Save as PDF” in the print dialog for a PDF."
+        >
+          <Icon name="download" size={15} /> Print / PDF
         </button>
       </div>
       <div className="list-controls">
@@ -2721,6 +2819,391 @@ function Timesheets({ setNotice }: NoticeProps) {
       )}
     </>
   );
+}
+
+// -- Printable timesheet report (opened in its own tab, then printed / saved as PDF) --
+
+interface TimesheetPrintPerson {
+  employeeId: string;
+  name: string;
+  code: string;
+  team: string | null;
+  rows: AdminTimesheetRow[];
+  noShows: RosterShift[];
+  // Approved leave overlapping the period.
+  leave: RosterLeave[];
+  // Events HR / a manager / the system entered for them (audit trail).
+  enteredByOthers: AttendanceEntryByOther[];
+  holidayLeft: number | null;
+  sickLeft: number | null;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
+}
+
+// Organisation of Working Time Act 1997 limits the report checks against.
+const MIN_DAILY_REST_HOURS = 11; // s.11
+const WEEKLY_HOURS_LIMIT = 48; // s.15 -- an average over 4 months, so one long week is a flag, not a breach
+const BREAK_RULES = { shortShiftHours: 4.5, shortBreakHours: 0.25, longShiftHours: 6, longBreakHours: 0.5 }; // s.12
+
+const PRINT_EVENT_LABELS: Record<string, string> = {
+  clock_in: "Clock in",
+  clock_out: "Clock out",
+  break_start: "First break start",
+  break_end: "First break end",
+  lunch_start: "Lunch start",
+  lunch_end: "Lunch end",
+};
+
+function timesheetPrintHtml({
+  people,
+  startDate,
+  endDate,
+  today,
+  teamLabel,
+  holidays,
+  recorderName,
+}: {
+  people: TimesheetPrintPerson[];
+  startDate: string;
+  endDate: string;
+  today: string;
+  teamLabel: string;
+  holidays: Map<string, string>;
+  recorderName: (id: string | null) => string;
+}): string {
+  const e = escapeHtml;
+  const longDate = (iso: string) =>
+    new Date(`${iso}T00:00:00`).toLocaleDateString(APP_LOCALE, { weekday: "short", day: "2-digit", month: "short", year: "numeric" });
+  const dateTime = (iso: string) =>
+    new Date(iso).toLocaleString(APP_LOCALE, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const time = (iso: string | null) => (iso ? formatTime(iso) : "—");
+  const dur = (hours: number) => formatDurationHours(hours);
+  const isWeekend = (iso: string) => {
+    const day = new Date(`${iso}T00:00:00`).getDay();
+    return day === 0 || day === 6;
+  };
+  const period = startDate === endDate ? longDate(startDate) : `${longDate(startDate)} – ${longDate(endDate)}`;
+  const generated = new Date().toLocaleString(APP_LOCALE, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  type Check = { name: string; when: string; issue: string };
+  type OpenItem = { name: string; date: string; issue: string };
+  const allChecks: Check[] = [];
+  const allOpen: OpenItem[] = [];
+  const auditRows: string[] = [];
+
+  const computed = people.map((person) => {
+    // Leave days inside the period, one per working day: weekends and bank
+    // holidays aren't leave days (matches how leave is charged).
+    const leaveDays: Array<{ date: string; leave: RosterLeave }> = [];
+    for (const l of person.leave) {
+      const from = l.startsOn > startDate ? l.startsOn : startDate;
+      const to = l.endsOn < endDate ? l.endsOn : endDate;
+      for (let d = from; d <= to; d = addDays(d, 1)) {
+        if (!isWeekend(d) && !holidays.has(d)) leaveDays.push({ date: d, leave: l });
+      }
+    }
+
+    const rows = [...person.rows].sort((a, b) => (a.clockedInAt ?? a.workDate).localeCompare(b.clockedInAt ?? b.workDate));
+    type DayInfo = { row: AdminTimesheetRow; day: TimesheetDay; notes: string[] };
+    const days: DayInfo[] = [];
+    let previousOut: string | null = null;
+    for (const row of rows) {
+      const day = timesheetDay(row, today);
+      const notes: string[] = [];
+      const breaks = day.breakHours + day.lunchHours;
+      if (day.missingClockOut) {
+        notes.push('<span class="warn">No clock-out — needs correcting</span>');
+        allOpen.push({ name: person.name, date: row.workDate, issue: `Clocked in ${time(row.clockedInAt)}, no clock-out recorded` });
+      }
+      for (const [start, end, label] of [
+        [row.firstBreakStartedAt, row.firstBreakEndedAt, "First break"],
+        [row.lunchStartedAt, row.lunchEndedAt, "Lunch"],
+      ] as const) {
+        if (start && !end && row.workDate < today) {
+          notes.push(`<span class="warn">${label} not ended</span>`);
+          allOpen.push({ name: person.name, date: row.workDate, issue: `${label} started ${time(start)}, never ended` });
+        }
+      }
+      if (!day.missingClockOut && row.clockedOutAt) {
+        if (day.totalHours > BREAK_RULES.longShiftHours && breaks < BREAK_RULES.longBreakHours) {
+          const issue = `Breaks ${dur(breaks) === "—" ? "none" : dur(breaks)} on a ${dur(day.totalHours)} shift (30 min required after 6h)`;
+          notes.push(`<span class="flag">${issue}</span>`);
+          allChecks.push({ name: person.name, when: longDate(row.workDate), issue });
+        } else if (day.totalHours > BREAK_RULES.shortShiftHours && breaks < BREAK_RULES.shortBreakHours) {
+          const issue = `Breaks ${dur(breaks) === "—" ? "none" : dur(breaks)} on a ${dur(day.totalHours)} shift (15 min required after 4h 30m)`;
+          notes.push(`<span class="flag">${issue}</span>`);
+          allChecks.push({ name: person.name, when: longDate(row.workDate), issue });
+        }
+      }
+      if (previousOut && row.clockedInAt) {
+        const rest = (new Date(row.clockedInAt).getTime() - new Date(previousOut).getTime()) / 3600000;
+        if (rest >= 0 && rest < MIN_DAILY_REST_HOURS) {
+          const issue = `Only ${dur(rest)} rest since the previous shift (11h required)`;
+          notes.push(`<span class="flag">${issue}</span>`);
+          allChecks.push({ name: person.name, when: longDate(row.workDate), issue });
+        }
+      }
+      if (row.clockedOutAt) previousOut = row.clockedOutAt;
+      const others = person.enteredByOthers.filter((x) =>
+        [
+          ["clock_in", row.clockedInAt],
+          ["clock_out", row.clockedOutAt],
+          ["break_start", row.firstBreakStartedAt],
+          ["break_end", row.firstBreakEndedAt],
+          ["lunch_start", row.lunchStartedAt],
+          ["lunch_end", row.lunchEndedAt],
+        ].some(([type, iso]) => iso && x.eventType === type && new Date(iso).getTime() === new Date(x.occurredAt).getTime()),
+      );
+      if (others.length) notes.push(`<span class="muted">* entered by ${e([...new Set(others.map((x) => recorderName(x.recordedBy)))].join(", "))}</span>`);
+      days.push({ row, day, notes });
+    }
+
+    for (const x of person.enteredByOthers) {
+      const backdated = new Date(x.enteredAt).getTime() - new Date(x.occurredAt).getTime() > 15 * 60000;
+      auditRows.push(`<tr>
+        <td>${e(person.name)}</td>
+        <td>${e(PRINT_EVENT_LABELS[x.eventType] ?? x.eventType)}</td>
+        <td>${e(dateTime(x.occurredAt))}</td>
+        <td>${e(dateTime(x.enteredAt))}${backdated ? ' <span class="flag">backdated</span>' : ""}</td>
+        <td>${e(recorderName(x.recordedBy))}</td>
+      </tr>`);
+    }
+
+    let total = 0;
+    let breaks = 0;
+    let lunch = 0;
+    let net = 0;
+    let missing = 0;
+    for (const { day } of days) {
+      total += day.totalHours;
+      breaks += day.breakHours;
+      lunch += day.lunchHours;
+      net += day.netHours;
+      if (day.missingClockOut) missing += 1;
+    }
+    const leaveByType = new Map<string, number>();
+    for (const { leave } of leaveDays) leaveByType.set(leave.leaveType, (leaveByType.get(leave.leaveType) ?? 0) + 1);
+    return { person, days, leaveDays, total, breaks, lunch, net, missing, leaveByType };
+  });
+
+  const leaveSummary = (byType: Map<string, number>) =>
+    byType.size === 0 ? "—" : [...byType.entries()].map(([type, n]) => `${leaveTypeLabel(type)} ${n}`).join(", ");
+  const left = (n: number | null) => (n === null ? "—" : formatLeaveDays(n));
+
+  const personSections = computed
+    .map((c) => {
+      type Entry = { date: string; order: number; html: string };
+      const entries: Entry[] = [];
+      const mark = (x: AttendanceEntryByOther[], eventType: string, iso: string | null) =>
+        iso && x.some((v) => v.eventType === eventType && new Date(v.occurredAt).getTime() === new Date(iso).getTime())
+          ? '<sup class="mark">*</sup>'
+          : "";
+      const by = c.person.enteredByOthers;
+      for (const { row, day, notes } of c.days) {
+        const out = row.clockedOutAt ? `${time(row.clockedOutAt)}${mark(by, "clock_out", row.clockedOutAt)}` : day.missingClockOut ? '<span class="warn">None</span>' : "Still working";
+        const range = (start: string | null, end: string | null, startType: string, endType: string, hours: number) =>
+          start
+            ? `${time(start)}${mark(by, startType, start)} – ${end ? `${time(end)}${mark(by, endType, end)}` : "not ended"}${end ? ` <span class="muted">(${dur(hours)})</span>` : ""}`
+            : "—";
+        entries.push({
+          date: row.workDate,
+          order: 0,
+          html: `<tr>
+            <td>${longDate(row.workDate)}</td>
+            <td>${time(row.clockedInAt)}${mark(by, "clock_in", row.clockedInAt)}</td>
+            <td>${range(row.firstBreakStartedAt, row.firstBreakEndedAt, "break_start", "break_end", day.breakHours)}</td>
+            <td>${range(row.lunchStartedAt, row.lunchEndedAt, "lunch_start", "lunch_end", day.lunchHours)}</td>
+            <td>${out}</td>
+            <td class="num">${dur(day.totalHours)}</td>
+            <td class="num">${dur(day.breakHours + day.lunchHours)}</td>
+            <td class="num"><b>${dur(day.netHours)}</b></td>
+            <td>${notes.join("<br>")}</td>
+          </tr>`,
+        });
+      }
+      for (const shift of c.person.noShows) {
+        entries.push({
+          date: shift.shiftDate,
+          order: 1,
+          html: `<tr class="noshow"><td>${longDate(shift.shiftDate)}</td><td colspan="7"><span class="warn">No-show</span> — rostered ${e(formatShiftTime(shift))}</td><td></td></tr>`,
+        });
+      }
+      for (const { date, leave } of c.leaveDays) {
+        entries.push({
+          date,
+          order: 2,
+          html: `<tr class="leave"><td>${longDate(date)}</td><td colspan="7"><b>${e(leaveTypeLabel(leave.leaveType))} leave</b></td><td>${leave.note ? e(leave.note) : ""}</td></tr>`,
+        });
+      }
+      entries.sort((a, b) => a.date.localeCompare(b.date) || a.order - b.order);
+
+      // Weekly subtotals (Mon–Sun): hours worked each week, as the Act's
+      // records require, with the 48h and weekly-rest checks.
+      const body: string[] = [];
+      const weekOf = (iso: string) => weekStart(iso);
+      const weeks = [...new Set(entries.map((x) => weekOf(x.date)))];
+      for (const week of weeks) {
+        body.push(...entries.filter((x) => weekOf(x.date) === week).map((x) => x.html));
+        const weekDays = c.days.filter((d) => weekOf(d.row.workDate) === week);
+        const weekNet = weekDays.reduce((sum, d) => sum + d.day.netHours, 0);
+        const weekTotal = weekDays.reduce((sum, d) => sum + d.day.totalHours, 0);
+        const weekBreaks = weekDays.reduce((sum, d) => sum + d.day.breakHours + d.day.lunchHours, 0);
+        const daysWorked = new Set(weekDays.map((d) => d.row.workDate)).size;
+        const flags: string[] = [];
+        const weekLabel = `week of ${longDate(week)}`;
+        if (weekNet > WEEKLY_HOURS_LIMIT) {
+          const issue = `${dur(weekNet)} worked (over 48h — the limit is a 4-month average)`;
+          flags.push(`<span class="flag">${issue}</span>`);
+          allChecks.push({ name: c.person.name, when: weekLabel, issue });
+        }
+        if (daysWorked >= 7) {
+          const issue = "Worked all 7 days — no 24h weekly rest";
+          flags.push(`<span class="flag">${issue}</span>`);
+          allChecks.push({ name: c.person.name, when: weekLabel, issue });
+        }
+        body.push(`<tr class="week">
+          <td colspan="5">Week of ${longDate(week)} — ${daysWorked} day${daysWorked === 1 ? "" : "s"} worked</td>
+          <td class="num">${dur(weekTotal)}</td><td class="num">${dur(weekBreaks)}</td><td class="num"><b>${dur(weekNet)}</b></td>
+          <td>${flags.join("<br>")}</td>
+        </tr>`);
+      }
+      const bodyHtml = body.length ? body.join("") : '<tr><td colspan="9" class="muted">No attendance or leave in this period.</td></tr>';
+      return `<section class="person">
+        <h2>${e(c.person.name)} <span class="muted">${e(c.person.code)}${c.person.team ? ` · ${e(c.person.team)}` : ""}</span></h2>
+        <table>
+          <thead><tr>
+            <th>Date</th><th>Clock in</th><th>First break</th><th>Lunch</th><th>Clock out</th>
+            <th class="num">Total</th><th class="num">Breaks</th><th class="num">Hours worked</th><th>Notes</th>
+          </tr></thead>
+          <tbody>${bodyHtml}</tbody>
+          <tfoot><tr>
+            <td colspan="5"><b>Period total</b> — ${c.days.length} day${c.days.length === 1 ? "" : "s"} worked${c.leaveDays.length ? `, ${c.leaveDays.length} leave day${c.leaveDays.length === 1 ? "" : "s"} (${e(leaveSummary(c.leaveByType))})` : ""}${c.missing ? `, <span class="warn">${c.missing} without clock-out (not counted)</span>` : ""}</td>
+            <td class="num">${dur(c.total)}</td><td class="num">${dur(c.breaks + c.lunch)}</td><td class="num"><b>${dur(c.net)}</b></td><td></td>
+          </tr></tfoot>
+        </table>
+      </section>`;
+    })
+    .join("");
+
+  const summaryRows = computed
+    .map((c) => {
+      const flags = allChecks.filter((x) => x.name === c.person.name).length;
+      const open = allOpen.filter((x) => x.name === c.person.name).length;
+      return `<tr>
+        <td><b>${e(c.person.name)}</b><br><span class="muted">${e(c.person.code)}${c.person.team ? ` · ${e(c.person.team)}` : ""}</span></td>
+        <td class="num">${c.days.length}</td>
+        <td class="num">${dur(c.total)}</td>
+        <td class="num">${dur(c.breaks)}</td>
+        <td class="num">${dur(c.lunch)}</td>
+        <td class="num"><b>${dur(c.net)}</b></td>
+        <td>${e(leaveSummary(c.leaveByType))}</td>
+        <td class="num">${left(c.person.holidayLeft)}</td>
+        <td class="num">${left(c.person.sickLeft)}</td>
+        <td class="num">${open ? `<span class="warn">${open}</span>` : "0"} / ${flags ? `<span class="flag">${flags}</span>` : "0"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const totals = computed.reduce(
+    (t, c) => ({ days: t.days + c.days.length, total: t.total + c.total, breaks: t.breaks + c.breaks, lunch: t.lunch + c.lunch, net: t.net + c.net, leave: t.leave + c.leaveDays.length }),
+    { days: 0, total: 0, breaks: 0, lunch: 0, net: 0, leave: 0 },
+  );
+
+  const openTable = allOpen.length
+    ? `<table><thead><tr><th>Employee</th><th>Date</th><th>To correct</th></tr></thead><tbody>${allOpen
+        .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name))
+        .map((x) => `<tr><td>${e(x.name)}</td><td>${longDate(x.date)}</td><td class="warn">${e(x.issue)}</td></tr>`)
+        .join("")}</tbody></table>`
+    : '<p class="ok">None — every day in this period has a clock-out and finished breaks.</p>';
+  const checksTable = allChecks.length
+    ? `<table><thead><tr><th>Employee</th><th>When</th><th>Check</th></tr></thead><tbody>${allChecks
+        .map((x) => `<tr><td>${e(x.name)}</td><td>${e(x.when)}</td><td class="flag">${e(x.issue)}</td></tr>`)
+        .join("")}</tbody></table>`
+    : '<p class="ok">No rest, break or weekly-hours issues found in this period.</p>';
+  const auditTable = auditRows.length
+    ? `<table><thead><tr><th>Employee</th><th>Event</th><th>Recorded time</th><th>Entered on</th><th>Entered by</th></tr></thead><tbody>${auditRows.join("")}</tbody></table>`
+    : '<p class="ok">None — every event in this period was recorded by the employee (kiosk or app).</p>';
+
+  return `<!doctype html>
+<html lang="en-IE">
+<head>
+<meta charset="utf-8">
+<title>Timesheet ${e(startDate)} to ${e(endDate)}</title>
+<style>
+  @page { size: A4 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 11px; color: #161a2e; background: #fff; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; border-bottom: 2px solid #232b6a; padding-bottom: 10px; margin-bottom: 16px; }
+  h1 { margin: 0; font-size: 18px; color: #232b6a; }
+  h2 { margin: 0 0 6px; font-size: 13px; }
+  .meta { text-align: right; line-height: 1.5; }
+  .muted { color: #6b7280; font-weight: normal; }
+  .warn { color: #b42318; font-weight: 600; }
+  .flag { color: #a1650a; font-weight: 600; }
+  .ok { color: #1f7a4a; margin: 0 0 6px; }
+  .mark { color: #2b6cd6; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+  th, td { padding: 4px 6px; border: 1px solid #d4d9e6; text-align: left; vertical-align: top; }
+  th { background: #f1f3f9; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em; }
+  thead { display: table-header-group; }
+  tfoot td { background: #f1f3f9; }
+  .num { text-align: right; white-space: nowrap; }
+  tr { break-inside: avoid; }
+  tr.leave td { background: #eef4ff; }
+  tr.noshow td { background: #fff4f2; }
+  tr.week td { background: #f7f8fc; font-weight: 600; }
+  section { margin-bottom: 18px; }
+  .person { break-inside: avoid-page; }
+  .actions { position: fixed; top: 12px; right: 12px; }
+  .actions button { padding: 8px 14px; border: 0; border-radius: 6px; background: #232b6a; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+  @media print { body { padding: 0; } .actions { display: none; } }
+</style>
+</head>
+<body>
+<div class="actions"><button onclick="window.print()">Print / Save as PDF</button></div>
+<header>
+  <div>
+    <h1>Timesheet report</h1>
+    <div>${e(period)} · ${e(teamLabel)}</div>
+  </div>
+  <div class="meta muted">Balkania HRM<br>Generated ${e(generated)}</div>
+</header>
+<section>
+  <h2>Summary</h2>
+  <table>
+    <thead><tr>
+      <th>Employee</th><th class="num">Days worked</th><th class="num">Total hours</th><th class="num">First breaks</th><th class="num">Lunch</th>
+      <th class="num">Hours worked</th><th>Leave taken (days)</th><th class="num">Holiday left</th><th class="num">Sick left</th><th class="num">Open / checks</th>
+    </tr></thead>
+    <tbody>${summaryRows || '<tr><td colspan="10" class="muted">No one in this period.</td></tr>'}</tbody>
+    <tfoot><tr>
+      <td><b>All employees (${computed.length})</b></td><td class="num">${totals.days}</td><td class="num">${dur(totals.total)}</td>
+      <td class="num">${dur(totals.breaks)}</td><td class="num">${dur(totals.lunch)}</td><td class="num"><b>${dur(totals.net)}</b></td>
+      <td>${totals.leave} day${totals.leave === 1 ? "" : "s"}</td><td></td><td></td><td class="num">${allOpen.length} / ${allChecks.length}</td>
+    </tr></tfoot>
+  </table>
+  <p class="muted">Total hours = clock-in to clock-out. Hours worked = total minus first break and lunch (rest breaks aren't working time). A past day without a clock-out can't be measured: it counts as 0 and is listed under Open items until corrected. Leave days skip weekends and bank holidays; only approved leave is shown. Holiday/sick left are today's balances.</p>
+</section>
+<section>
+  <h2>Open items — records to correct</h2>
+  ${openTable}
+</section>
+<section>
+  <h2>Working time checks (Organisation of Working Time Act 1997)</h2>
+  <p class="muted">Flags for review, not findings: 11 consecutive hours' rest between shifts (s.11); a 15-minute break after 4h 30m and 30 minutes after 6h (s.12); 24 hours' rest each week (s.13); 48 hours a week, averaged over 4 months (s.15). Exemptions and averaging may apply.</p>
+  ${checksTable}
+</section>
+<section>
+  <h2>Audit trail — entries made on an employee's behalf</h2>
+  <p class="muted">Clock-ins, breaks and clock-outs keyed in by HR, a manager or the system rather than by the employee. Marked <sup class="mark">*</sup> in the daily tables below.</p>
+  ${auditTable}
+</section>
+${personSections}
+<script>window.addEventListener("load", function () { setTimeout(function () { window.print(); }, 200); });</script>
+</body>
+</html>`;
 }
 
 // Day-by-day breakdown for one person: when they worked, both breaks, and

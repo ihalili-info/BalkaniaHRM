@@ -1148,6 +1148,56 @@ export interface AdminTimesheetRow {
   lunchEndedAt: string | null;
 }
 
+// An attendance event someone else keyed in: HR or a manager recording it on
+// the employee's behalf (possibly backdated), or the automatic clock-out when
+// an account is deactivated. For the audit trail on the timesheet report.
+export interface AttendanceEntryByOther {
+  employeeId: string;
+  eventType: string;
+  occurredAt: string;
+  // When it was actually entered -- later than occurredAt if backdated.
+  enteredAt: string;
+  // Who entered it; null for the automatic clock-out, or for entries made
+  // before recorded_by existed (20261116_record_retention_and_audit.sql).
+  recordedBy: string | null;
+}
+
+export async function listAttendanceEntriesByOthers(startDate: string, endDate: string): Promise<AttendanceEntryByOther[]> {
+  // A day's events can fall just outside its date (UTC offset, night shifts).
+  const from = new Date(`${startDate}T00:00:00`);
+  from.setDate(from.getDate() - 1);
+  const to = new Date(`${endDate}T00:00:00`);
+  to.setDate(to.getDate() + 2);
+  const query = (columns: string) =>
+    fetchAllPages((rangeFrom, rangeTo) =>
+      client()
+        .from("attendance_events")
+        .select(columns)
+        .gte("occurred_at", from.toISOString())
+        .lt("occurred_at", to.toISOString())
+        .order("occurred_at")
+        .order("id")
+        .range(rangeFrom, rangeTo),
+    );
+  type Row = { employee_id: string; event_type: string; occurred_at: string; created_at: string; source: string; recorded_by?: string | null };
+  let rows: Row[];
+  try {
+    rows = (await query("employee_id,event_type,occurred_at,created_at,source,recorded_by")) as unknown as Row[];
+  } catch {
+    // recorded_by not migrated yet: fall back to source alone.
+    rows = (await query("employee_id,event_type,occurred_at,created_at,source")) as unknown as Row[];
+  }
+  return rows
+    .filter((r) => r.source === "admin" || (r.recorded_by != null && r.recorded_by !== r.employee_id))
+    .map((r) => ({
+      employeeId: r.employee_id,
+      eventType: r.event_type,
+      occurredAt: r.occurred_at,
+      enteredAt: r.created_at,
+      recordedBy: r.recorded_by ?? null,
+    }));
+}
+
 export async function listTimesheet(startDate: string, endDate: string): Promise<AdminTimesheetRow[]> {
   const data = await fetchAllPages((from, to) =>
     client()

@@ -1911,6 +1911,10 @@ function Attendance({ setNotice, canRecord, currentUserId }: NoticeProps & { can
   const today = toIsoDate(new Date());
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
+  // Which preset button was clicked. Tracked explicitly because some presets
+  // can cover the same dates (on a Monday "Today" and "This week" are both
+  // just today), so matching on dates alone would highlight both.
+  const [preset, setPreset] = useState<string | null>("Today");
   const [rows, setRows] = useState<AdminAttendanceSession[] | null>(null);
   const [employees, setEmployees] = useState<Map<string, AdminEmployee>>(new Map());
   const [teams, setTeams] = useState<AdminTeam[]>([]);
@@ -2031,6 +2035,7 @@ function Attendance({ setNotice, canRecord, currentUserId }: NoticeProps & { can
             setNotice(`Attendance recorded for ${employeeName}${workDate === today ? "" : ` on ${formatDate(workDate)}`}.`);
             // Jump to the day that was recorded so the change is visible.
             if (workDate < fromDate || workDate > toDate) {
+              setPreset(null);
               setFromDate(workDate);
               setToDate(workDate);
             } else {
@@ -2042,26 +2047,48 @@ function Attendance({ setNotice, canRecord, currentUserId }: NoticeProps & { can
       <div className="timesheet-range">
         <label>
           From
-          <DateInput value={fromDate} max={toDate} onChange={setFromDate} />
+          <DateInput
+            value={fromDate}
+            max={toDate}
+            onChange={(value) => {
+              setPreset(null);
+              setFromDate(value);
+            }}
+          />
         </label>
         <label>
           To
-          <DateInput value={toDate} min={fromDate} onChange={setToDate} />
+          <DateInput
+            value={toDate}
+            min={fromDate}
+            onChange={(value) => {
+              setPreset(null);
+              setToDate(value);
+            }}
+          />
         </label>
         <div className="range-presets">
-          {attendanceRangePresets(today).map(([label, from, to]) => (
+          {attendanceRangePresets(today).map(([label, from, to], _i, presets) => {
+            // The clicked preset wins; dates typed by hand light up the first
+            // preset they match, so only one button is ever highlighted.
+            const matches = ([, f, t]: [string, string, string]) => f === fromDate && t === toDate;
+            const clicked = presets.find(([l]) => l === preset);
+            const activeLabel = clicked && matches(clicked) ? clicked[0] : presets.find(matches)?.[0];
+            return (
             <button
               key={label}
               type="button"
-              className={`outline-button${from === fromDate && to === toDate ? " active" : ""}`}
+              className={`outline-button${label === activeLabel ? " active" : ""}`}
               onClick={() => {
+                setPreset(label);
                 setFromDate(from);
                 setToDate(to);
               }}
             >
               {label}
             </button>
-          ))}
+            );
+          })}
         </div>
       </div>
       <div className="list-controls">

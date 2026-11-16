@@ -2640,9 +2640,11 @@ function Timesheets({ setNotice }: NoticeProps) {
 
   // Printable report (print it, or "Save as PDF" in the print dialog): per
   // person, every day's clock-in, breaks, lunch, clock-out and hours, with
-  // their approved leave days in the same timeline.
-  async function handlePrint() {
+  // their approved leave days in the same timeline. With onlyEmployeeId, the
+  // same report for just that one person.
+  async function handlePrint(onlyEmployeeId?: string) {
     if (!sheetRows) return;
+    const onlyThem = (employeeId: string) => !onlyEmployeeId || employeeId === onlyEmployeeId;
     // Open the tab synchronously so pop-up blockers allow it, then fill it.
     const win = window.open("", "_blank");
     if (!win) {
@@ -2658,7 +2660,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         // Audit trail: entries HR / a manager / the system made for someone.
         listAttendanceEntriesByOthers(startDate, endDate).catch(() => [] as AttendanceEntryByOther[]),
       ]);
-      const approvedLeave = leave.filter((l) => l.status === "approved" && inTeam(l.employeeId) && names.has(l.employeeId));
+      const approvedLeave = leave.filter((l) => l.status === "approved" && inTeam(l.employeeId) && names.has(l.employeeId) && onlyThem(l.employeeId));
       const people = new Map<string, TimesheetPrintPerson>();
       const personFor = (employeeId: string, fallbackName: string, fallbackCode: string) => {
         let person = people.get(employeeId);
@@ -2680,7 +2682,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         }
         return person;
       };
-      for (const s of summaries) {
+      for (const s of summaries.filter((s) => onlyThem(s.employeeId))) {
         const person = personFor(s.employeeId, s.employeeName, s.employeeCode);
         person.rows = s.rows;
         person.noShows = noShowsOf(s.employeeId);
@@ -2703,7 +2705,10 @@ function Timesheets({ setNotice }: NoticeProps) {
       const ordered = [...people.values()].sort(
         (a, b) => (sort === "team" ? compareTeams(a.team, b.team) : 0) || a.name.localeCompare(b.name),
       );
-      const teamLabel = !teamFilter ? "All teams" : teamFilter === "none" ? NO_TEAM : teams.find((t) => t.id === teamFilter)?.name ?? "Selected team";
+      const single = onlyEmployeeId ? ordered[0] : undefined;
+      const teamLabel = single
+        ? [single.name, single.code, single.team].filter(Boolean).join(" · ")
+        : !teamFilter ? "All teams" : teamFilter === "none" ? NO_TEAM : teams.find((t) => t.id === teamFilter)?.name ?? "Selected team";
       win.document.open();
       win.document.write(
         timesheetPrintHtml({
@@ -2712,6 +2717,8 @@ function Timesheets({ setNotice }: NoticeProps) {
           endDate,
           today,
           teamLabel,
+          // Becomes the suggested PDF file name.
+          documentTitle: single ? `Timesheet ${single.name} ${startDate} to ${endDate}` : undefined,
           holidays: new Map(holidays.map((h) => [h.date, h.name])),
           // A manager may not be able to see an HR user's profile.
           recorderName: (id) => (id ? names.get(id)?.name ?? "HR / manager" : "System, or not recorded (before audit tracking)"),
@@ -2745,7 +2752,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         </button>
         <button
           className="outline-button"
-          onClick={handlePrint}
+          onClick={() => handlePrint()}
           disabled={exporting || !rows}
           title="Printable report: clock in/out, breaks, lunch, leave and hours per person. Use “Save as PDF” in the print dialog for a PDF."
         >
@@ -2824,6 +2831,15 @@ function Timesheets({ setNotice }: NoticeProps) {
                     <span className="ts-optional">{formatDaysLeft(summary.employeeId, "annual")}</span>
                     <span className="ts-optional">{formatDaysLeft(summary.employeeId, "medical")}</span>
                     <span className="row-actions">
+                      <button
+                        className="icon-action"
+                        onClick={() => handlePrint(summary.employeeId)}
+                        disabled={exporting}
+                        aria-label={`Print or save ${summary.employeeName}'s timesheet as PDF`}
+                        title={`Print / PDF for ${summary.employeeName} only`}
+                      >
+                        <Icon name="printer" size={15} />
+                      </button>
                       {(summary.rows.length > 0 || noShows.length > 0) && (
                         <button
                           className="icon-action"
@@ -2889,6 +2905,7 @@ function timesheetPrintHtml({
   endDate,
   today,
   teamLabel,
+  documentTitle,
   holidays,
   recorderName,
 }: {
@@ -2897,6 +2914,7 @@ function timesheetPrintHtml({
   endDate: string;
   today: string;
   teamLabel: string;
+  documentTitle?: string;
   holidays: Map<string, string>;
   recorderName: (id: string | null) => string;
 }): string {
@@ -3157,7 +3175,7 @@ function timesheetPrintHtml({
 <html lang="en-IE">
 <head>
 <meta charset="utf-8">
-<title>Timesheet ${e(startDate)} to ${e(endDate)}</title>
+<title>${e(documentTitle ?? `Timesheet ${startDate} to ${endDate}`)}</title>
 <style>
   @page { size: A4 landscape; margin: 12mm; }
   * { box-sizing: border-box; }

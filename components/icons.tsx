@@ -15,6 +15,7 @@ const paths: Record<string, string> = {
   briefcase: "M4 8h16v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8Zm4 0V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M4 13h16",
   device: "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm5 15h2",
   download: "M12 4v11m0 0-4-4m4 4 4-4M5 20h14",
+  printer: "M7 9V3h10v6M7 17H5a1 1 0 0 1-1-1v-5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5a1 1 0 0 1-1 1h-2M7 14h10v7H7v-7Z",
   upload: "M12 15V4m0 0-4 4m4-4 4 4M5 20h14",
   menu: "M4 6h16M4 12h16M4 18h16",
   search: "m21 21-4.3-4.3M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z",

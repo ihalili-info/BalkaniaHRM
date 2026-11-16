@@ -392,8 +392,8 @@
   .table-head.cols-7 > b:nth-child(n+4):nth-child(-n+6), .table-row.cols-7 > span:nth-child(n+4):nth-child(-n+6) { display: none; }
 }
 /* Timesheet overview: per-person totals with an expandable day-by-day list. */
-.table-head.ts-cols, .table-row.ts-cols { grid-template-columns: 1.6fr 0.5fr 0.9fr 0.8fr 1fr 0.8fr 0.7fr 44px; }
-.table-head.ts-cols.roster, .table-row.ts-cols.roster { grid-template-columns: 1.5fr 0.5fr 0.8fr 0.9fr 0.8fr 1fr 0.9fr 0.8fr 0.7fr 44px; }
+.table-head.ts-cols, .table-row.ts-cols { grid-template-columns: 1.6fr 0.5fr 0.9fr 0.8fr 1fr 0.8fr 0.7fr 80px; }
+.table-head.ts-cols.roster, .table-row.ts-cols.roster { grid-template-columns: 1.5fr 0.5fr 0.8fr 0.9fr 0.8fr 1fr 0.9fr 0.8fr 0.7fr 80px; }
 .timesheet-person { border-bottom: 1px solid var(--line); }
 .timesheet-person:last-child { border-bottom: 0; }
 .timesheet-person > .table-row { border-bottom: 0; }
@@ -403,7 +403,7 @@
 .timesheet-day.head b { font-size: 12px; font-weight: 600; color: var(--muted); }
 @media (max-width: 800px) {
   .table-head.ts-cols, .table-row.ts-cols,
-  .table-head.ts-cols.roster, .table-row.ts-cols.roster { grid-template-columns: 1.4fr 0.9fr 0.9fr 44px; }
+  .table-head.ts-cols.roster, .table-row.ts-cols.roster { grid-template-columns: 1.4fr 0.9fr 0.9fr 80px; }
   .table-head.ts-cols > .ts-optional, .table-row.ts-cols > .ts-optional { display: none; }
   .timesheet-days { margin: 0 0 12px; }
   .timesheet-day { grid-template-columns: 1fr 1fr; gap: 4px 10px; }

@@ -152,6 +152,7 @@
 /* Avatar + name side by side (previously stacked, doubling row height). */
 .person-cell { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; min-width: 0; }
 .person-name { overflow: hidden; text-overflow: ellipsis; margin-right: 8px; }
+.person-cell .leaving-sub { flex-basis: 100%; }
 .person-dot { display: inline-grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; margin-right: 10px; border-radius: var(--radius-sm); background: var(--navy-soft); color: var(--navy); font-style: normal; font-weight: 600; font-size: 12px; }
 .team-cell { line-height: 1.4; overflow-wrap: anywhere; }
 .capitalize { text-transform: capitalize; }

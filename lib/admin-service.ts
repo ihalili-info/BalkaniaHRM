@@ -183,6 +183,84 @@ export async function upsertEmployeeDetails(employeeId: string, details: Employe
   if (error) throw error;
 }
 
+// -- Leaving details (20261118_employee_leaving_details.sql) --
+// Kept in employee_details (HR + the employee only), not profiles, because the
+// reason can be sensitive and managers read profiles.
+
+export const LEAVING_REASONS = {
+  resignation: "Resignation",
+  dismissal: "Dismissal",
+  redundancy: "Redundancy",
+  end_of_contract: "End of fixed-term contract",
+  retirement: "Retirement",
+  other: "Other",
+} as const;
+export type LeavingReason = keyof typeof LEAVING_REASONS;
+
+export interface LeavingDetails {
+  leavingDate: string | null;
+  leavingReason: LeavingReason | null;
+  leavingNotes: string | null;
+}
+
+// Until the migration is applied the columns don't exist; reads then return
+// nothing rather than breaking the screens that show them.
+const missingLeavingColumns = (error: { message?: string } | null) => !!error?.message?.includes("leaving_");
+
+export async function getLeavingDetails(employeeId: string): Promise<LeavingDetails> {
+  const { data, error } = await client()
+    .from("employee_details")
+    .select("leaving_date,leaving_reason,leaving_notes")
+    .eq("employee_id", employeeId)
+    .maybeSingle();
+  if (error && !missingLeavingColumns(error)) throw error;
+  return {
+    leavingDate: data?.leaving_date ?? null,
+    leavingReason: (data?.leaving_reason as LeavingReason | null) ?? null,
+    leavingNotes: data?.leaving_notes ?? null,
+  };
+}
+
+// Everyone with a leaving date on file, for the Former employees list and the
+// export. HR only (RLS); anyone else gets an empty map.
+export async function listLeavingDetails(): Promise<Map<string, LeavingDetails>> {
+  const { data, error } = await client()
+    .from("employee_details")
+    .select("employee_id,leaving_date,leaving_reason,leaving_notes")
+    .not("leaving_date", "is", null);
+  if (error) {
+    if (missingLeavingColumns(error)) return new Map();
+    throw error;
+  }
+  return new Map(
+    (data ?? []).map((row) => [
+      row.employee_id as string,
+      { leavingDate: row.leaving_date, leavingReason: row.leaving_reason as LeavingReason | null, leavingNotes: row.leaving_notes },
+    ]),
+  );
+}
+
+// Upsert only writes these three columns, so PPS number, address etc. are untouched.
+export async function saveLeavingDetails(employeeId: string, details: LeavingDetails): Promise<void> {
+  const { error } = await client()
+    .from("employee_details")
+    .upsert(
+      {
+        employee_id: employeeId,
+        leaving_date: details.leavingDate || null,
+        leaving_reason: details.leavingReason || null,
+        leaving_notes: details.leavingNotes?.trim() || null,
+      },
+      { onConflict: "employee_id" },
+    );
+  if (error) {
+    if (missingLeavingColumns(error)) {
+      throw new Error("Leaving details can't be saved yet: the database update for them (20261118_employee_leaving_details.sql) hasn't been applied.");
+    }
+    throw error;
+  }
+}
+
 export interface UpdateEmployeeInput {
   id: string;
   firstName: string;

@@ -149,6 +149,12 @@ import {
   setAssetRetired,
   setDeviceActive,
   setEmployeeActive,
+  saveLeavingDetails,
+  getLeavingDetails,
+  listLeavingDetails,
+  LEAVING_REASONS,
+  type LeavingDetails,
+  type LeavingReason,
   setLeaveBalance,
   setPhoneClockOut as savePhoneClockOut,
   setLeaveEntitlement,
@@ -691,6 +697,9 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
   const [showImportModal, setShowImportModal] = useState(false);
   const [search, setSearch] = useState("");
   const [editingEmployee, setEditingEmployee] = useState<AdminEmployee | null>(null);
+  const [deactivatingEmployee, setDeactivatingEmployee] = useState<AdminEmployee | null>(null);
+  // Leaving date / reason per employee (HR only; empty for everyone else).
+  const [leaving, setLeaving] = useState<Map<string, LeavingDetails>>(new Map());
   const [busyId, setBusyId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -698,6 +707,11 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
     listEmployees()
       .then((data) => setRows(data))
       .catch((err) => setError(errorMessage(err, "Couldn't load employees.")));
+    if (isHrAdmin) {
+      listLeavingDetails()
+        .then(setLeaving)
+        .catch(() => setLeaving(new Map()));
+    }
     // Teams are only used to show every team a manager oversees, so a failure
     // here just falls back to the single team on the profile.
     listTeams()
@@ -718,6 +732,12 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
     return names.length > 0 ? names.join(", ") : "—";
   }
 
+  function leavingLabel(employeeId: string): string | null {
+    const left = leaving.get(employeeId);
+    if (!left?.leavingDate) return null;
+    return `Left ${formatDate(left.leavingDate)}${left.leavingReason ? ` · ${LEAVING_REASONS[left.leavingReason]}` : ""}`;
+  }
+
   const visibleRows =
     rows?.filter(
       (row) => (tab === "active" ? row.active : !row.active) && matchesSearch(search, row.fullName, row.employeeCode, row.role.replace("_", " "), teamLabel(row)),
@@ -732,8 +752,21 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
     try {
       downloadCsv(
         `employees-${new Date().toISOString().slice(0, 10)}.csv`,
-        ["Name", "Surname", "Employee code", "Role", "Team", "Status"],
-        rows.map((row) => [row.firstName, row.lastName, row.employeeCode, row.role, teamLabel(row) === "—" ? "" : teamLabel(row), row.active ? "Active" : "Former"]),
+        ["Name", "Surname", "Employee code", "Role", "Team", "Status", "Start date", "Leaving date", "Leaving reason"],
+        rows.map((row) => {
+          const left = leaving.get(row.id);
+          return [
+            row.firstName,
+            row.lastName,
+            row.employeeCode,
+            row.role,
+            teamLabel(row) === "—" ? "" : teamLabel(row),
+            row.active ? "Active" : "Former",
+            row.startDate ? formatCsvDate(row.startDate) : "",
+            left?.leavingDate ? formatCsvDate(left.leavingDate) : "",
+            left?.leavingReason ? LEAVING_REASONS[left.leavingReason] : "",
+          ];
+        }),
       );
     } finally {
       setExporting(false);
@@ -754,11 +787,24 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
   }
 
   async function handleToggleActive(row: AdminEmployee) {
-    if (row.active && !window.confirm(`Deactivate ${row.fullName}? They'll be signed out immediately, any open attendance session will be automatically clocked out, and they won't be able to sign back in until reactivated.`)) return;
+    // Deactivating asks for the leaving date first (DeactivateEmployeeModal).
+    if (row.active) {
+      setDeactivatingEmployee(row);
+      return;
+    }
+    const left = leaving.get(row.id);
+    if (
+      !window.confirm(
+        `Reactivate ${row.fullName}? They'll be able to sign in again.${left?.leavingDate ? ` Their leaving date (${formatDate(left.leavingDate)}) will be cleared.` : ""}`,
+      )
+    ) {
+      return;
+    }
     setBusyId(row.id);
     try {
-      await setEmployeeActive(row.id, !row.active);
-      setNotice(row.active ? `${row.fullName} was deactivated.` : `${row.fullName} was reactivated.`);
+      await setEmployeeActive(row.id, true);
+      if (left?.leavingDate) await saveLeavingDetails(row.id, { leavingDate: null, leavingReason: null, leavingNotes: null });
+      setNotice(`${row.fullName} was reactivated.`);
       load();
     } catch (err) {
       setNotice(errorMessage(err, "Couldn't update the employee's status."));
@@ -850,6 +896,17 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
           }}
         />
       )}
+      {deactivatingEmployee && (
+        <DeactivateEmployeeModal
+          employee={deactivatingEmployee}
+          onClose={() => setDeactivatingEmployee(null)}
+          onDone={(message) => {
+            setDeactivatingEmployee(null);
+            setNotice(message);
+            load();
+          }}
+        />
+      )}
       {editingEmployee && (
         <EditEmployeeModal
           employee={editingEmployee}
@@ -884,6 +941,7 @@ function Employees({ setNotice, isHrAdmin, isManager, currentUserId }: NoticePro
                 <i className="person-dot">{row.fullName[0]}</i>
                 <span className="person-name">{row.fullName}</span>
                 {!row.active && <span className="pill">Inactive</span>}
+                {!row.active && leavingLabel(row.id) && <em className="asset-sub leaving-sub">{leavingLabel(row.id)}</em>}
                 {isHrAdmin && !row.active && (
                   <button className="purge-link" disabled={busyId === row.id} onClick={() => handlePurge(row)}>
                     Purge all data
@@ -1369,6 +1427,85 @@ function AddEmployeeModal({
   );
 }
 
+// Deactivating = the person has left: record their last day and why, so it's
+// on file later, then sign them out (set-employee-active).
+function DeactivateEmployeeModal({
+  employee,
+  onClose,
+  onDone,
+}: {
+  employee: AdminEmployee;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const [leavingDate, setLeavingDate] = useState(() => toIsoDate(new Date()));
+  const [leavingReason, setLeavingReason] = useState<LeavingReason | "">("");
+  const [leavingNotes, setLeavingNotes] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    setSaving(true);
+    try {
+      await setEmployeeActive(employee.id, false);
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't deactivate the employee."));
+      setSaving(false);
+      return;
+    }
+    try {
+      await saveLeavingDetails(employee.id, { leavingDate, leavingReason: leavingReason || null, leavingNotes });
+      onDone(`${employee.fullName} was deactivated. Leaving date ${formatDate(leavingDate)} saved.`);
+    } catch (err) {
+      // They're already signed out; the date can be added later from Edit.
+      onDone(`${employee.fullName} was deactivated, but the leaving date wasn't saved: ${errorMessage(err, "unknown error")} You can add it later with Edit.`);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>Deactivate {employee.fullName}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <p className="muted">
+            They&apos;ll be signed out immediately, any open attendance session will be clocked out, and they won&apos;t be able to sign back in
+            until reactivated. Their attendance and leave history is kept.
+          </p>
+          <label>
+            Leaving date
+            <DateInput required value={leavingDate} min={employee.startDate ?? undefined} onChange={setLeavingDate} disabled={saving} />
+            <small className="field-hint">Their last day of employment. It can be in the past, or a later date if they&apos;re finishing their notice.</small>
+          </label>
+          <label>
+            Reason <span className="field-optional">optional</span>
+            <select value={leavingReason} onChange={(e) => setLeavingReason(e.target.value as LeavingReason | "")} disabled={saving}>
+              <option value="">Not specified</option>
+              {Object.entries(LEAVING_REASONS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Notes <span className="field-optional">optional</span>
+            <textarea value={leavingNotes} onChange={(e) => setLeavingNotes(e.target.value)} disabled={saving} rows={3} placeholder="e.g. notice given 01/11, P45 issued, eligible for rehire" />
+            <small className="field-hint">Visible to HR and to the employee only.</small>
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving || !leavingDate}>{saving ? "Deactivating…" : "Deactivate"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function EditEmployeeModal({
   employee,
   onClose,
@@ -1394,6 +1531,11 @@ function EditEmployeeModal({
   const [phoneNumber, setPhoneNumber] = useState("");
   const [address, setAddress] = useState("");
   const [placeOfBirth, setPlaceOfBirth] = useState("");
+  const [leavingDate, setLeavingDate] = useState("");
+  const [leavingReason, setLeavingReason] = useState<LeavingReason | "">("");
+  const [leavingNotes, setLeavingNotes] = useState("");
+  // Loaded leaving details; null until loaded, so a failed load never wipes them.
+  const [originalLeaving, setOriginalLeaving] = useState<LeavingDetails | null>(null);
   // Sign-in email from auth.users: null while loading, "" if it couldn't be read.
   const [originalEmail, setOriginalEmail] = useState<string | null>(null);
   const [email, setEmail] = useState("");
@@ -1426,9 +1568,19 @@ function EditEmployeeModal({
         setPlaceOfBirth(details.placeOfBirth ?? "");
       })
       .catch(() => undefined);
+    getLeavingDetails(employee.id)
+      .then((details) => {
+        setOriginalLeaving(details);
+        setLeavingDate(details.leavingDate ?? "");
+        setLeavingReason(details.leavingReason ?? "");
+        setLeavingNotes(details.leavingNotes ?? "");
+      })
+      .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee.id]);
 
+  // Former employees, or anyone with a leaving date already (e.g. on notice).
+  const showLeaving = !employee.active || !!originalLeaving?.leavingDate;
   const emailChanged = originalEmail !== null && !emailLoadError && email.trim().toLowerCase() !== originalEmail.toLowerCase();
 
   async function handleSubmit(event: React.FormEvent) {
@@ -1460,6 +1612,15 @@ function EditEmployeeModal({
         startDate: startDate || undefined,
       });
       await upsertEmployeeDetails(employee.id, { ppsNumber, dateOfBirth, phoneNumber, address, placeOfBirth });
+      if (
+        showLeaving &&
+        originalLeaving &&
+        (leavingDate !== (originalLeaving.leavingDate ?? "") ||
+          leavingReason !== (originalLeaving.leavingReason ?? "") ||
+          leavingNotes !== (originalLeaving.leavingNotes ?? ""))
+      ) {
+        await saveLeavingDetails(employee.id, { leavingDate: leavingDate || null, leavingReason: leavingReason || null, leavingNotes });
+      }
       onSaved(updated);
     } catch (err) {
       setError(errorMessage(err, "Couldn't save changes."));
@@ -1583,6 +1744,29 @@ function EditEmployeeModal({
             Address
             <textarea value={address} onChange={(e) => setAddress(e.target.value)} disabled={saving} rows={2} />
           </label>
+          {showLeaving && (
+            <>
+              <h3 className="form-section">Leaving</h3>
+              <label>
+                Leaving date
+                <DateInput value={leavingDate} min={startDate || undefined} onChange={setLeavingDate} disabled={saving || !originalLeaving} />
+                <small className="field-hint">Their last day of employment.</small>
+              </label>
+              <label>
+                Reason <span className="field-optional">optional</span>
+                <select value={leavingReason} onChange={(e) => setLeavingReason(e.target.value as LeavingReason | "")} disabled={saving || !originalLeaving}>
+                  <option value="">Not specified</option>
+                  {Object.entries(LEAVING_REASONS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Leaving notes <span className="field-optional">optional</span>
+                <textarea value={leavingNotes} onChange={(e) => setLeavingNotes(e.target.value)} disabled={saving || !originalLeaving} rows={2} />
+              </label>
+            </>
+          )}
           {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
           <div className="admin-modal-actions">
             <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>

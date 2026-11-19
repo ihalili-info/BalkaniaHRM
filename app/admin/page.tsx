@@ -144,6 +144,7 @@ import {
   returnAsset,
   reviewLeaveRequest,
   listAnnualLeaveAvailable,
+  listBookedFutureLeave,
   seedBankHolidays,
   sendPasswordReset,
   setAssetRetired,
@@ -2564,6 +2565,7 @@ function Timesheets({ setNotice }: NoticeProps) {
   const [names, setNames] = useState<Map<string, { name: string; code: string; teamId: string | null; teamName: string | null }>>(new Map());
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [teamFilter, setTeamFilter] = useState("");
+  const [search, setSearch] = useState("");
   const [sort, setSort] = useState<TeamSort>("name");
   // Days left today in the current leave year, keyed by employee then leave type.
   // Not tied to the date range: it's always the live balance.
@@ -2604,10 +2606,19 @@ function Timesheets({ setNotice }: NoticeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate]);
 
-  const inTeam = (employeeId: string) => matchesTeam(teamFilter, names.get(employeeId)?.teamId, teams);
+  // Team filter + search, applied to everything below: the table, the totals,
+  // both exports and Print / PDF. The fallbacks cover a failed employee-list
+  // load, where the timesheet row still carries the name and code.
+  const inView = (employeeId: string, fallbackName?: string, fallbackCode?: string) => {
+    const who = names.get(employeeId);
+    return (
+      matchesTeam(teamFilter, who?.teamId, teams) &&
+      matchesSearch(search, who?.name ?? fallbackName, who?.code ?? fallbackCode, who?.teamName)
+    );
+  };
   const teamOf = (employeeId: string) => names.get(employeeId)?.teamName ?? null;
-  const sheetRows = rows?.filter((r) => inTeam(r.employeeId)) ?? null;
-  const rosterShifts = roster.filter((s) => inTeam(s.employeeId));
+  const sheetRows = rows?.filter((r) => inView(r.employeeId, r.employeeName, r.employeeCode)) ?? null;
+  const rosterShifts = roster.filter((s) => inView(s.employeeId));
 
   const summaries: EmployeeTimesheetSummary[] = [];
   if (sheetRows) {
@@ -2844,7 +2855,7 @@ function Timesheets({ setNotice }: NoticeProps) {
         // Audit trail: entries HR / a manager / the system made for someone.
         listAttendanceEntriesByOthers(startDate, endDate).catch(() => [] as AttendanceEntryByOther[]),
       ]);
-      const approvedLeave = leave.filter((l) => l.status === "approved" && inTeam(l.employeeId) && names.has(l.employeeId) && onlyThem(l.employeeId));
+      const approvedLeave = leave.filter((l) => l.status === "approved" && inView(l.employeeId) && names.has(l.employeeId) && onlyThem(l.employeeId));
       const people = new Map<string, TimesheetPrintPerson>();
       const personFor = (employeeId: string, fallbackName: string, fallbackCode: string) => {
         let person = people.get(employeeId);
@@ -2892,7 +2903,8 @@ function Timesheets({ setNotice }: NoticeProps) {
       const single = onlyEmployeeId ? ordered[0] : undefined;
       const teamLabel = single
         ? [single.name, single.code, single.team].filter(Boolean).join(" · ")
-        : !teamFilter ? "All teams" : teamFilter === "none" ? NO_TEAM : teams.find((t) => t.id === teamFilter)?.name ?? "Selected team";
+        : (!teamFilter ? "All teams" : teamFilter === "none" ? NO_TEAM : teams.find((t) => t.id === teamFilter)?.name ?? "Selected team") +
+          (search.trim() ? ` · matching “${search.trim()}”` : "");
       win.document.open();
       win.document.write(
         timesheetPrintHtml({
@@ -2944,6 +2956,16 @@ function Timesheets({ setNotice }: NoticeProps) {
         </button>
       </div>
       <div className="list-controls">
+        <div className="search-input">
+          <Icon name="search" size={15} />
+          <input
+            type="search"
+            placeholder="Search employee, code or team"
+            aria-label="Search employees"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
         <TeamControls teams={teams} team={teamFilter} onTeam={setTeamFilter} sort={sort} onSort={(v) => setSort(v as TeamSort)} />
       </div>
       <div className="admin-stats">
@@ -2967,7 +2989,11 @@ function Timesheets({ setNotice }: NoticeProps) {
       ) : !rows ? (
         <LoadingPanel />
       ) : summaries.length === 0 ? (
-        <EmptyPanel icon="chart" title="No attendance in this range" note="Adjust the date range to see recorded hours." />
+        search.trim() && rows.length > 0 ? (
+          <EmptyPanel icon="search" title="No matches" note={`No one in this range matches "${search.trim()}".`} />
+        ) : (
+          <EmptyPanel icon="chart" title="No attendance in this range" note="Adjust the date range to see recorded hours." />
+        )
       ) : (
         <section className="panel">
           <div className="panel-title"><h2>Timesheet overview</h2><span className="filter">{formatDate(startDate)} – {formatDate(endDate)}</span></div>
@@ -4628,10 +4654,17 @@ function LeaveEntitlements({ setNotice, filter }: NoticeProps & { filter: LeaveF
   const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState<AdminLeaveBalance | null>(null);
+  // Approved leave still to come, per `${employeeId}:${leaveType}`. Optional:
+  // without it every row shows 0 booked and "Available now" = "After booked".
+  const [booked, setBooked] = useState<Map<string, number>>(new Map());
 
   function load() {
-    listLeaveBalances()
-      .then(setRows)
+    const today = toIsoDate(new Date());
+    Promise.all([listLeaveBalances(), listBookedFutureLeave(today).catch(() => new Map<string, number>())])
+      .then(([balances, future]) => {
+        setBooked(future);
+        setRows(balances);
+      })
       .catch((err) => setError(errorMessage(err, "Couldn't load leave entitlements.")));
   }
 
@@ -4665,30 +4698,52 @@ function LeaveEntitlements({ setNotice, filter }: NoticeProps & { filter: LeaveF
         <EmptyPanel icon="calendar" title="No entitlements set" note="Set entitlements for employees and managers so their leave balances show up correctly." />
       ) : (
         <section className="panel">
-          {/* "Remaining" is what the employee can still book today (earned so far,
-              including any imported opening balance, minus used). "Yearly allowance"
-              is what keeps accruing at 1/12 per month until the 1 April reset. */}
-          <div className="table-head cols-7">
-            <b>Employee</b><b>Leave type</b><b>Remaining</b><b>Earned so far</b><b>Used</b><b>Yearly allowance</b><b className="actions-head">Edit</b>
+          {/* "Available now" = earned so far (including any imported opening
+              balance) minus leave already taken. "After booked" also takes off
+              approved leave still to come -- what's left once it's been taken,
+              at today's accrual. "Yearly allowance" keeps accruing at 1/12 per
+              month until the reset (1 April; 1 January for sick leave). */}
+          <div className="table-head ent-cols">
+            <b>Employee</b><b>Leave type</b>
+            <b title="Earned so far minus leave already taken">Available now</b>
+            <b title="Available now minus approved leave still to come">After booked</b>
+            <b>Earned so far</b>
+            <b title="Approved leave up to and including today">Taken</b>
+            <b title="Approved leave after today">Booked</b>
+            <b>Yearly allowance</b>
+            <b className="actions-head">Edit</b>
           </div>
           {rows
             .filter((row) => filter.matches(row.employeeId, row.employeeName, leaveTypeLabel(row.leaveType)))
             .sort((a, b) => a.employeeName.localeCompare(b.employeeName) || a.leaveType.localeCompare(b.leaveType))
-            .map((row) => (
-              <div className="table-row cols-7" key={row.id}>
-                <span>{row.employeeName}</span>
-                <span>{leaveTypeLabel(row.leaveType)}</span>
-                <span><b>{formatLeaveDays(row.earned - row.used)}</b></span>
-                <span>{formatLeaveDays(row.earned)}</span>
-                <span>{formatLeaveDays(row.used)}</span>
-                <span>{formatLeaveDays(row.entitlement)}</span>
-                <span className="row-actions">
-                  <button className="icon-action" onClick={() => setEditing(row)} aria-label={`Edit ${row.employeeName} ${leaveTypeLabel(row.leaveType)}`} title="Edit">
-                    <Icon name="edit" size={15} />
-                  </button>
-                </span>
-              </div>
-            ))}
+            .map((row) => {
+              // Never more than "used": a manual edit of used can make it smaller
+              // than the approved requests add up to.
+              const future = Math.min(booked.get(`${row.employeeId}:${row.leaveType}`) ?? 0, Math.max(row.used, 0));
+              const taken = row.used - future;
+              const availableNow = row.earned - taken;
+              const afterBooked = row.earned - row.used;
+              return (
+                <div className="table-row ent-cols" key={row.id}>
+                  <span>{row.employeeName}</span>
+                  <span>{leaveTypeLabel(row.leaveType)}</span>
+                  <span><b className={availableNow < 0 ? "under-hours" : undefined}>{formatLeaveDays(availableNow)}</b></span>
+                  <span>
+                    <span className={afterBooked < 0 ? "under-hours" : undefined}>{formatLeaveDays(afterBooked)}</span>
+                    {afterBooked < 0 && <em className="asset-sub">Booked beyond what&apos;s earned</em>}
+                  </span>
+                  <span>{formatLeaveDays(row.earned)}</span>
+                  <span>{formatLeaveDays(taken)}</span>
+                  <span>{future > 0 ? formatLeaveDays(future) : "—"}</span>
+                  <span>{formatLeaveDays(row.entitlement)}</span>
+                  <span className="row-actions">
+                    <button className="icon-action" onClick={() => setEditing(row)} aria-label={`Edit ${row.employeeName} ${leaveTypeLabel(row.leaveType)}`} title="Edit">
+                      <Icon name="edit" size={15} />
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
         </section>
       )}
     </>

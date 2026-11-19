@@ -686,6 +686,53 @@ export async function listLeaveBalances(): Promise<AdminLeaveBalance[]> {
   }));
 }
 
+// Approved leave still to come, in this leave year's balance: "used" on
+// leave_balances is deducted at approval, so a holiday booked for next month
+// is already in it. Splitting it out gives the balance as it stands today
+// (earned - taken) next to the balance once booked leave is taken (earned -
+// used). Keyed `${employeeId}:${leaveType}`, in the same counted days as
+// "used" (leave_working_days: weekdays, no bank holidays).
+export async function listBookedFutureLeave(today: string): Promise<Map<string, number>> {
+  const annualYear = currentLeaveYearStart(new Date(`${today}T00:00:00`));
+  const sickYear = currentSickYearStart(new Date(`${today}T00:00:00`));
+  // The balance year a request counts against is the one it starts in.
+  const yearOf = (leaveType: string) => (leaveType === "medical" ? sickYear : annualYear);
+  const nextYear = (start: string) => `${Number(start.slice(0, 4)) + 1}${start.slice(4)}`;
+  const { data, error } = await client()
+    .from("leave_requests")
+    .select("employee_id,leave_type,starts_on,ends_on,working_days")
+    .eq("status", "approved")
+    .gt("ends_on", today)
+    .gte("starts_on", sickYear < annualYear ? sickYear : annualYear);
+  if (error) throw error;
+  const tomorrow = (() => {
+    const d = new Date(`${today}T00:00:00`);
+    d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const booked = new Map<string, number>();
+  await Promise.all(
+    (data ?? []).map(async (row) => {
+      const start = yearOf(row.leave_type);
+      if (row.starts_on < start || row.starts_on >= nextYear(start)) return;
+      let days = Number(row.working_days);
+      // Leave that has already started: only the days after today are still to come.
+      if (row.starts_on <= today) {
+        const { data: left, error: rpcError } = await client().rpc("leave_working_days", {
+          p_starts_on: tomorrow,
+          p_ends_on: row.ends_on,
+          p_leave_type: row.leave_type,
+        });
+        if (rpcError) throw rpcError;
+        days = Number(left ?? 0);
+      }
+      const key = `${row.employee_id}:${row.leave_type}`;
+      booked.set(key, (booked.get(key) ?? 0) + days);
+    }),
+  );
+  return booked;
+}
+
 // Annual leave available to book today, per employee, so pending requests
 // that would go below zero can be flagged (only HR can approve those --
 // 20261025_negative_annual_leave_and_self_service_changes.sql).

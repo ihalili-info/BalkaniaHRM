@@ -411,6 +411,14 @@
   .timesheet-day.head { display: none; }
 }
 
+/* Leave entitlements: available now / after booked / earned / taken / booked / allowance. */
+.table-head.ent-cols, .table-row.ent-cols { grid-template-columns: 1.5fr 1fr 0.9fr 0.9fr 0.8fr 0.6fr 0.6fr 0.8fr 0.5fr; }
+@media (max-width: 760px) {
+  .table-head.ent-cols, .table-row.ent-cols { grid-template-columns: 1.4fr 0.8fr 0.8fr auto; }
+  .table-head.ent-cols > b:nth-child(2), .table-row.ent-cols > span:nth-child(2),
+  .table-head.ent-cols > b:nth-child(n+5):nth-child(-n+8), .table-row.ent-cols > span:nth-child(n+5):nth-child(-n+8) { display: none; }
+}
+
 /* Rostered timesheet: the cols-7 layout plus holiday/sick days left. */
 .table-head.cols-9, .table-row.cols-9 { grid-template-columns: 1.5fr 0.8fr 0.9fr 0.9fr 0.6fr 0.8fr 0.7fr 0.9fr 0.8fr; }
 @media (max-width: 800px) {

@@ -1186,7 +1186,7 @@ function ImportEmployeesModal({
                       <input type="number" min={0} step={0.5} value={sickEntitlement} onChange={(e) => setSickEntitlement(e.target.value)} disabled={importing} />
                     </label>
                     <p className="muted small">
-                      Each person&apos;s balance today is set to the days in the file. From next month the allowance above keeps adding 1/12 per month,
+                      Each person&apos;s balance today is set to the days in the file. The allowance above keeps adding 1/12 on the last day of each month,
                       until the leave year resets on 1 April. Blank cells mean no balance is set for that leave type.
                     </p>
                   </div>
@@ -4851,8 +4851,9 @@ function LeaveEntitlements({ setNotice, filter }: NoticeProps & { filter: LeaveF
           {/* "Available now" = earned so far (including any imported opening
               balance) minus leave already taken. "After booked" also takes off
               approved leave still to come -- what's left once it's been taken,
-              at today's accrual. "Yearly allowance" keeps accruing at 1/12 per
-              month until the reset (1 April; 1 January for sick leave). */}
+              at today's accrual. "Yearly allowance" accrues 1/12 on the last
+              day of each month until the reset (1 April). Sick leave is the full
+              allowance once qualified, resetting on 1 January. */}
           <div className="table-head ent-cols">
             <b>Employee</b><b>Leave type</b>
             <b title="Earned so far minus leave already taken">Available now</b>
@@ -5030,7 +5031,7 @@ function SetEntitlementModal({
           <label>
             Yearly allowance (days)
             <input type="number" min="0" step="0.5" required value={entitlement} onChange={(e) => setEntitlement(e.target.value)} disabled={saving} />
-            <small className="field-hint">Added 1/12 per month until the leave year resets on 1 April.</small>
+            <small className="field-hint">1/12 is added on the last day of each month worked, until the leave year resets on 1 April.</small>
           </label>
           {existing && (
             <label>

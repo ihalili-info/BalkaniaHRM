@@ -2562,7 +2562,7 @@ function Timesheets({ setNotice }: NoticeProps) {
   const [rows, setRows] = useState<AdminTimesheetRow[] | null>(null);
   // Published roster for the range; empty when the roster isn't used.
   const [roster, setRoster] = useState<RosterShift[]>([]);
-  const [names, setNames] = useState<Map<string, { name: string; code: string; teamId: string | null; teamName: string | null }>>(new Map());
+  const [names, setNames] = useState<Map<string, { name: string; code: string; teamId: string | null; teamName: string | null; active: boolean }>>(new Map());
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [teamFilter, setTeamFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -2588,7 +2588,7 @@ function Timesheets({ setNotice }: NoticeProps) {
       .then(([sheet, shifts, employees, balances, teamList]) => {
         setRoster(shifts);
         setTeams(teamList);
-        setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode, teamId: e.teamId, teamName: e.teamName }])));
+        setNames(new Map(employees.map((e) => [e.id, { name: e.fullName, code: e.employeeCode, teamId: e.teamId, teamName: e.teamName, active: e.active }])));
         const left = new Map<string, Map<string, number>>();
         for (const b of balances) {
           const byType = left.get(b.employeeId) ?? new Map<string, number>();
@@ -2618,7 +2618,18 @@ function Timesheets({ setNotice }: NoticeProps) {
   };
   const teamOf = (employeeId: string) => names.get(employeeId)?.teamName ?? null;
   const sheetRows = rows?.filter((r) => inView(r.employeeId, r.employeeName, r.employeeCode)) ?? null;
-  const rosterShifts = roster.filter((s) => inView(s.employeeId));
+  // Former employees only appear for the days they actually worked: their
+  // clock-ins are working-time records that must stay on the report, but
+  // roster shifts after their last day in the range aren't no-shows -- they'd
+  // left. Someone who left before the range doesn't appear at all.
+  const isFormer = (employeeId: string) => names.get(employeeId)?.active === false;
+  const lastWorked = new Map<string, string>();
+  for (const r of sheetRows ?? []) {
+    if (isFormer(r.employeeId) && r.workDate > (lastWorked.get(r.employeeId) ?? "")) lastWorked.set(r.employeeId, r.workDate);
+  }
+  const rosterShifts = roster.filter(
+    (s) => inView(s.employeeId) && (!isFormer(s.employeeId) || s.shiftDate <= (lastWorked.get(s.employeeId) ?? "")),
+  );
 
   const summaries: EmployeeTimesheetSummary[] = [];
   if (sheetRows) {
@@ -2882,7 +2893,11 @@ function Timesheets({ setNotice }: NoticeProps) {
         person.rows = s.rows;
         person.noShows = noShowsOf(s.employeeId);
       }
-      for (const l of approvedLeave) personFor(l.employeeId, "Unknown", "").leave.push(l);
+      for (const l of approvedLeave) {
+        // A former employee is only on the report if they worked in the period.
+        if (isFormer(l.employeeId) && !people.has(l.employeeId)) continue;
+        personFor(l.employeeId, "Unknown", "").leave.push(l);
+      }
       // Keep entries inside the period, plus any that belong to a day in it
       // (e.g. a night shift's clock-out after midnight on the last day).
       for (const x of byOthers) {
@@ -3021,7 +3036,9 @@ function Timesheets({ setNotice }: NoticeProps) {
                   <div className={`table-row ts-cols${usesRoster ? " roster" : ""}`}>
                     <span>
                       {summary.employeeName}
-                      <em className="asset-sub">{summary.employeeCode}{team ? ` · ${team}` : ""}</em>
+                      <em className="asset-sub">
+                        {summary.employeeCode}{team ? ` · ${team}` : ""}{isFormer(summary.employeeId) ? " · Former employee" : ""}
+                      </em>
                     </span>
                     <span className="ts-optional">{summary.days}</span>
                     {usesRoster && <span className="ts-optional">{r ? `${r.scheduled.toFixed(1)}h` : "—"}</span>}
@@ -3883,6 +3900,9 @@ function Leaves({
   // team (or type a name) once and flip between Requests, Sick leave, ...
   const [search, setSearch] = useState("");
   const [teamFilter, setTeamFilter] = useState("");
+  // Former (deactivated) employees are left out of every leave tab unless
+  // HR asks to see them, e.g. to look up an old request.
+  const [includeFormer, setIncludeFormer] = useState(false);
   const [employees, setEmployees] = useState<Map<string, AdminEmployee>>(new Map());
   const [teams, setTeams] = useState<AdminTeam[]>([]);
   const [peopleLoaded, setPeopleLoaded] = useState(false);
@@ -3906,6 +3926,7 @@ function Leaves({
     matches: (employeeId, name, ...extra) => {
       const employee = employees.get(employeeId);
       return (
+        (includeFormer || employee?.active !== false) &&
         matchesTeam(teamFilter, employee?.teamId, teams) &&
         matchesSearch(search, name, employee?.employeeCode, employee?.teamName, ...extra)
       );
@@ -3945,6 +3966,12 @@ function Leaves({
           <TeamFilterOptions teams={teams} />
           <option value="none">{NO_TEAM}</option>
         </select>
+        {showTabs && view !== "planner" && (
+          <label className="planner-only">
+            <input type="checkbox" checked={includeFormer} onChange={(e) => setIncludeFormer(e.target.checked)} />
+            Show former employees
+          </label>
+        )}
       </div>
       {(!showTabs || view === "requests" || view === "planner" || view === "upcoming" || view === "decided") && (
         <LeaveTypeFilter value={typeFilter} onChange={setTypeFilter} />

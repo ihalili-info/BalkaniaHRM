@@ -598,6 +598,12 @@
 .planner-cell.holiday, .planner-day.holiday, .planner-swatch.holiday { background: var(--success-soft); }
 .planner-day.today { background: var(--brand-soft); color: var(--brand-dark); }
 .planner-cell.today { box-shadow: inset 2px 0 0 var(--brand), inset -2px 0 0 var(--brand); }
+/* Double-click (double-tap on phones) an empty day to record leave. */
+.planner-cell { touch-action: manipulation; user-select: none; }
+.planner-cell.can-add { cursor: cell; }
+.planner-cell.can-add:hover { background: var(--brand-soft, rgba(35, 43, 106, 0.08)); }
+.planner-cell.on-leave { cursor: help; }
+.planner-hint { margin-left: auto; color: var(--muted); font-style: italic; }
 .planner-cell.on-leave { margin: 5px 0; min-height: 24px; border-left-color: transparent; }
 .planner-cell.annual, .planner-swatch.annual { background: #2b6cd6; }
 .planner-cell.medical, .planner-swatch.medical { background: var(--danger); }

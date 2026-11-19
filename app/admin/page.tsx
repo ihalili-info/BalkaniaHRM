@@ -3977,7 +3977,7 @@ function Leaves({
         <LeaveTypeFilter value={typeFilter} onChange={setTypeFilter} />
       )}
       {showTabs && view === "planner" ? (
-        <LeavePlanner employees={peopleLoaded ? employees : null} typeFilter={typeFilter} filter={filter} />
+        <LeavePlanner setNotice={setNotice} employees={peopleLoaded ? employees : null} typeFilter={typeFilter} filter={filter} />
       ) : showTabs && view === "upcoming" ? (
         <UpcomingLeave typeFilter={typeFilter} filter={filter} />
       ) : showTabs && view === "decided" ? (
@@ -4007,10 +4007,11 @@ function shiftMonth(monthStart: string, delta: number) {
 }
 
 function LeavePlanner({
+  setNotice,
   employees,
   typeFilter,
   filter,
-}: {
+}: NoticeProps & {
   // null while the employee list is still loading.
   employees: Map<string, AdminEmployee> | null;
   typeFilter: LeaveTypeFilterValue;
@@ -4022,6 +4023,10 @@ function LeavePlanner({
   const [holidays, setHolidays] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [onlyOnLeave, setOnlyOnLeave] = useState(false);
+  // Double-clicking an empty day opens this (record_leave_for_employee:
+  // HR for anyone, managers / team leads for the people they supervise).
+  const [recording, setRecording] = useState<{ employee: AdminEmployee; date: string } | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [y, m] = month.split("-").map(Number);
   const monthEnd = toIsoDate(new Date(y, m, 0));
@@ -4040,7 +4045,7 @@ function LeavePlanner({
         setHolidays(new Map(h.map((x) => [x.date, x.name])));
       })
       .catch((err) => setError(errorMessage(err, "Couldn't load leave for this month.")));
-  }, [month, monthEnd]);
+  }, [month, monthEnd, reloadKey]);
 
   // Employee|date -> the leave covering it. Approved wins over pending.
   const leaveOn = useMemo(() => {
@@ -4107,7 +4112,20 @@ function LeavePlanner({
         <span><i className="planner-swatch other" /> Other</span>
         <span><i className="planner-swatch pending" /> Pending approval</span>
         <span><i className="planner-swatch holiday" /> Bank holiday</span>
+        <span className="planner-hint">Double-click a day to record leave</span>
       </div>
+      {recording && (
+        <PlannerLeaveModal
+          employee={recording.employee}
+          date={recording.date}
+          onClose={() => setRecording(null)}
+          onSaved={(message) => {
+            setRecording(null);
+            setNotice(message);
+            setReloadKey((k) => k + 1);
+          }}
+        />
+      )}
       {error ? (
         <ErrorState message={error} />
       ) : !leave || !employees ? (
@@ -4171,7 +4189,21 @@ function LeavePlanner({
                         : holiday
                           ? `Bank holiday: ${holiday}`
                           : undefined;
-                      return <span key={d} role="gridcell" className={classes} title={title} />;
+                      return (
+                        <span
+                          key={d}
+                          role="gridcell"
+                          className={`${classes}${l ? "" : " can-add"}`}
+                          title={title ?? `${person.fullName}, ${formatDate(d)}: double-click to record leave`}
+                          onDoubleClick={() =>
+                            l
+                              ? setNotice(
+                                  `${person.fullName} already has ${leaveTypeLabel(l.leaveType).toLowerCase()} leave ${formatDate(l.startsOn)} – ${formatDate(l.endsOn)}. Change or cancel it from the Requests or Decided tab.`,
+                                )
+                              : setRecording({ employee: person, date: d })
+                          }
+                        />
+                      );
                     })}
                   </div>
                 </Fragment>
@@ -4181,6 +4213,97 @@ function LeavePlanner({
         </section>
       )}
     </>
+  );
+}
+
+// Record leave for one person straight from the Planner, e.g. a day they were
+// off that HR agreed to pay as annual leave. Same RPC and rules as the
+// Roster's "Leave" option: balance and service checks, overlapping leave
+// refused, their shifts that day removed, recorded under the caller's name.
+function PlannerLeaveModal({
+  employee,
+  date,
+  onClose,
+  onSaved,
+}: {
+  employee: AdminEmployee;
+  date: string;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [leaveType, setLeaveType] = useState("annual");
+  const [startsOn, setStartsOn] = useState(date);
+  const [endsOn, setEndsOn] = useState(date);
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!startsOn || !endsOn || endsOn < startsOn) return setError("The last day must be on or after the first.");
+    setError(null);
+    setSaving(true);
+    try {
+      const status = await recordLeaveForEmployee(employee.id, leaveType, startsOn, endsOn, note);
+      const when = startsOn === endsOn ? formatDate(startsOn) : `${formatDate(startsOn)} – ${formatDate(endsOn)}`;
+      if (leaveType === "medical") {
+        onSaved(`Sick leave recorded for ${employee.fullName} (${when}). It stays pending until their medical certificate is uploaded and it's approved.`);
+      } else if (status === "pending") {
+        onSaved(`${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName} (${when}), but it takes their balance below zero, so it's waiting for HR to approve.`);
+      } else {
+        onSaved(`${leaveTypeLabel(leaveType)} leave recorded for ${employee.fullName} (${when}).`);
+      }
+    } catch (err) {
+      setError(errorMessage(err, "Couldn't record the leave."));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-overlay" onClick={onClose}>
+      <div className="admin-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="admin-modal-header">
+          <h2>Record leave for {employee.fullName}</h2>
+          <button className="icon-action" onClick={onClose} aria-label="Close"><Icon name="x" size={16} /></button>
+        </div>
+        <form className="admin-login-form" onSubmit={handleSubmit}>
+          <label>
+            Leave type
+            <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} disabled={saving}>
+              {leaveTypeOptions.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            First day
+            <DateInput
+              required
+              value={startsOn}
+              onChange={(value) => {
+                setStartsOn(value);
+                if (endsOn < value) setEndsOn(value);
+              }}
+              disabled={saving}
+            />
+          </label>
+          <label>
+            Last day
+            <DateInput required value={endsOn} min={startsOn} onChange={setEndsOn} disabled={saving} />
+            <small className="field-hint">Weekends and bank holidays in the range aren&apos;t counted.</small>
+          </label>
+          <label>
+            Note <span className="field-optional">optional</span>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} disabled={saving} rows={2} placeholder="e.g. Was off, agreed to use annual leave (paid)" />
+          </label>
+          {error && <p className="form-error"><Icon name="warning" size={14} />{error}</p>}
+          <div className="admin-modal-actions">
+            <button type="button" className="outline-button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="primary-admin" type="submit" disabled={saving}>{saving ? "Saving…" : "Record leave"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
